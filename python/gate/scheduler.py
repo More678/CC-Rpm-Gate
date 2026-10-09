@@ -200,6 +200,26 @@ class Scheduler:
                 wait_ms = min(wait_ms, poll_ms if cancel_check is not None else 1000)
                 self._cond.wait(max(wait_ms, 1) / 1000.0)
 
+    def reconfigure(self, cfg: Dict[str, Any]) -> None:
+        """运行中换一套限流参数（UI 改配置后即时生效，不用重启闸门）。
+
+        窗口长度没变的限制保留已有的放行记录，免得改个配置就把刚用掉的名额清零、
+        让一波请求趁机冲出去；新增的窗口从空记录开始。排队中的请求不受影响，
+        叫醒它们按新参数重新判断。
+        """
+        limits = cfg.get("effectiveLimits") or [
+            {"windowMs": cfg["windowMs"], "max": cfg["rpm"]}
+        ]
+        with self._cond:
+            old_hits = {lim["windowMs"]: lim["hits"] for lim in self._limits}
+            self._limits = [
+                {"windowMs": int(lim["windowMs"]), "max": int(lim["max"]),
+                 "hits": old_hits.get(int(lim["windowMs"]), deque())}
+                for lim in sorted(limits, key=lambda l: l["windowMs"])
+            ]
+            self.cfg = cfg
+            self._cond.notify_all()
+
     def cancel(self, ticket: int) -> bool:
         """按票号取消一个还在排队的请求（给外部线程用）。"""
         with self._cond:

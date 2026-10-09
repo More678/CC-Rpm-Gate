@@ -1,6 +1,7 @@
 """命令行入口：
 
     python -m gate            # 启动闸门
+    python -m gate --ui       # 图形界面：改配置、起停、看实时状态
     python -m gate --status   # 查询正在跑的闸门状态
 """
 
@@ -34,6 +35,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args and args[0] == "--status":
         return print_status()
+    if args and args[0] in ("--ui", "--gui"):
+        from .ui import run  # 延迟导入：命令行启动不需要 tkinter
+        return run(args[1:])
     if args:
         sys.stderr.write(f"[cc-rpm-gate] 不认识的参数: {' '.join(args)}\n{__doc__}")
         return 2

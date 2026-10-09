@@ -15,11 +15,29 @@ from typing import Any, Optional, TextIO
 LEVELS = {"debug": 10, "info": 20, "warn": 30, "error": 40, "silent": 100}
 
 
+def _to_stdout(text: str) -> None:
+    """往 stdout 写一行。
+
+    pythonw.exe（UI 版用它启动，为的是不弹黑框）下 sys.stdout 是 None，
+    直接 write 会 AttributeError，所以这里统一兜一层。
+    """
+    stream = sys.stdout
+    if stream is None:
+        return
+    try:
+        stream.write(text)
+        stream.flush()
+    except (OSError, ValueError):
+        pass  # 流被关了或重定向到了无效目标，日志不该把闸门带崩
+
+
 class Logger:
     def __init__(self, log_level: str = "info", log_file: str = "") -> None:
         self._threshold = LEVELS.get(log_level, LEVELS["info"])
         self._lock = threading.Lock()
         self._stream: Optional[TextIO] = None
+        # UI 版用它把日志同时显示在窗口里，命令行启动时是 None
+        self.tap: Optional[Any] = None
 
         if log_file and self._threshold < LEVELS["silent"]:
             try:
@@ -27,7 +45,7 @@ class Logger:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 self._stream = path.open("a", encoding="utf-8")
             except OSError as err:
-                sys.stdout.write(f"[gate] 无法打开日志文件 {log_file}: {err}\n")
+                _to_stdout(f"[gate] 无法打开日志文件 {log_file}: {err}\n")
                 self._stream = None
 
     def _write(self, level: str, msg: str, extra: Any = None) -> None:
@@ -37,16 +55,22 @@ class Logger:
         tail = "" if extra is None else f" {_safe_json(extra)}"
         line = f"{ts} [{level}] {msg}{tail}\n"
         with self._lock:
-            sys.stdout.write(line)
-            sys.stdout.flush()
+            _to_stdout(line)
             if self._stream is not None:
                 try:
                     self._stream.write(line)
                     self._stream.flush()
                 except OSError as err:
                     # 日志写失败不能把闸门带崩，降级成只写 stdout
-                    sys.stdout.write(f"[gate] 日志文件写入失败，转为仅输出到控制台: {err}\n")
+                    _to_stdout(f"[gate] 日志文件写入失败，转为仅输出到控制台: {err}\n")
                     self._stream = None
+            tap = self.tap
+        # tap 在锁外调：它是界面回调，不该把日志锁攥在手里
+        if tap is not None:
+            try:
+                tap(level, line)
+            except Exception:
+                self.tap = None  # 界面已经关了，别再回调
 
     def debug(self, msg: str, extra: Any = None) -> None:
         self._write("debug", msg, extra)
@@ -74,6 +98,7 @@ class NullLogger(Logger):
         self._threshold = LEVELS["silent"]
         self._lock = threading.Lock()
         self._stream = None
+        self.tap = None
 
     def _write(self, level: str, msg: str, extra: Any = None) -> None:
         return

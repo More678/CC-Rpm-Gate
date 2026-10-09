@@ -157,8 +157,8 @@ def make_handler_class(
     retry_hook: Any = None,
 ) -> type:
     """按配置生成请求处理类（http.server 要的是类，不是实例）。"""
-    bypass = frozenset(cfg["bypassPaths"])
-    upstreams: Dict[str, str] = cfg.get("upstreams") or {}
+    # upstream / upstreams / bypassPaths 每个请求现读 cfg，不在这里抓快照：
+    # UI 改配置时是原地更新这个 dict 的，keep-alive 长连接上的下一个请求也要用新值
 
     def parse_target(url: str) -> Dict[str, Any]:
         """把上游 URL 拆成 http.client 需要的几件东西。"""
@@ -195,7 +195,7 @@ def make_handler_class(
             if pathname == "/__gate/status":
                 self._send_json(200, {
                     "upstream": cfg["upstream"],
-                    "upstreams": dict(upstreams),
+                    "upstreams": dict(cfg.get("upstreams") or {}),
                     "listen": f"{cfg['host']}:{cfg['port']}",
                     **scheduler.snapshot(),
                     "retry": retry_hook.snapshot() if retry_hook is not None else {"enabled": False},
@@ -207,7 +207,8 @@ def make_handler_class(
 
             # 命名上游：/__gate/u/<名字>/... → 走 cfg["upstreams"][名字]
             _p, qmark, query = raw_path.partition("?")
-            route = resolve_upstream(pathname, ("?" + query) if qmark else "", upstreams, cfg["upstream"])
+            route = resolve_upstream(pathname, ("?" + query) if qmark else "",
+                                     cfg.get("upstreams") or {}, cfg["upstream"])
             if route["target"] is None:
                 self._send_gate_error(
                     404, "invalid_request_error",
@@ -234,16 +235,17 @@ def make_handler_class(
                 self.close_connection = True
                 return
 
-            if self.command != "POST" or real_path in bypass:
+            if self.command != "POST" or real_path in cfg["bypassPaths"]:
                 logger.debug("直放（不排队）", meta)
                 self._forward(target, route["path"], body, meta)
                 return
 
             overrides = request_overrides(self.headers) if retry_hook is not None else {}
+            # 配了用户钩子时，钩子可能把 maxRetries 从 0 调上去，所以也要拦截
             can_retry = (
                 retry_hook is not None
                 and retry_hook.cfg["enabled"]
-                and retry_hook.max_retries_for(overrides) > 0
+                and (retry_hook.max_retries_for(overrides) > 0 or retry_hook.has_user_hook())
             )
             intercept = list(retry_hook.cfg["statuses"]) if can_retry else []
 
@@ -323,6 +325,7 @@ def make_handler_class(
                     held_ms=held_ms,
                     retry_after_ms=result.get("retryAfterMs"),
                     overrides=overrides,
+                    meta=meta,
                 )
 
                 if decision["action"] == "retry" and last_captured is not None:
