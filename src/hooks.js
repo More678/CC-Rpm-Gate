@@ -41,6 +41,7 @@ function resolveHookPath(value, root = ROOT) {
   if (ext === '.py') return '';
   // 写了 JS 扩展名就原样用；其余（包括 "gate.hooks" 这种 .hooks 结尾）补 .js，
   // 这样 retry.hook 写 "gate.hooks" 时两套实现各自找 .js / .py
+  // .mjs 原样保留，加载时给出明确报错（见 reloadIfChanged），比悄悄改名成 .mjs.js 好懂
   if (ext === '.js' || ext === '.cjs' || ext === '.mjs') return path.resolve(root, raw);
   return path.resolve(root, `${raw}.js`);
 }
@@ -97,6 +98,10 @@ class UserHook {
     if (sig === this.loadedFrom) return;
 
     try {
+      if (this.file.toLowerCase().endsWith('.mjs')) {
+        // 钩子是 require() 进来的，Node 18/20 的 require 加载不了 ESM
+        throw new Error('钩子文件要用 CommonJS 写（.js / .cjs + exports.onRetry），不支持 .mjs');
+      }
       delete require.cache[require.resolve(this.file)];
       const mod = require(this.file);
       const fn = typeof mod === 'function' ? mod : (mod && mod.onRetry);
@@ -128,17 +133,21 @@ class UserHook {
     this.reloadIfChanged();
     if (!this.fn) return {};
 
-    let out;
     this.stats.calls += 1;
+    // 调用和读返回值都包在 try 里：返回对象上的 getter、Proxy 也可能抛，
+    // 漏到 proxy 的 async 处理函数里就是未处理的 rejection，Node 18+ 会让进程退出
     try {
-      out = this.fn(ctx);
+      return this._coerce(this.fn(ctx));
     } catch (err) {
       this.stats.errors += 1;
-      this.lastError = err.message;
-      this._note(`钩子抛错，这次按配置走: ${err.message}`);
+      this.lastError = err && err.message ? err.message : String(err);
+      this._note(`钩子出错，这次按配置走: ${this.lastError}`);
       return {};
     }
+  }
 
+  /** 校验钩子返回值。规则与 Python 版 _coerce 一致：数值字段只认真整数，不做类型转换。 */
+  _coerce(out) {
     if (out === false) {
       this.stats.forcedPassthrough += 1;
       return { deny: true };
@@ -159,10 +168,12 @@ class UserHook {
       return { deny: true };
     }
     for (const key of NUM_FIELDS) {
-      if (out[key] === undefined || out[key] === null) continue;
-      const n = Number(out[key]);
-      if (Number.isInteger(n) && n >= 0 && (key !== 'nextMinuteOffsetMs' || n < 60000)) {
-        overrides[key] = n;
+      const v = out[key];
+      if (v === undefined || v === null) continue;
+      // 不用 Number() 转换：true → 1、'' → 0、[7] → 7 这种都该算错，和 Python 版保持一致
+      if (typeof v === 'number' && Number.isInteger(v) && v >= 0
+          && (key !== 'nextMinuteOffsetMs' || v < 60000)) {
+        overrides[key] = v;
       } else {
         this._warnOnce(key, `钩子返回的 ${key} 不合法（要 ≥ 0 的整数）: ${String(out[key])}，忽略这一项`);
       }
@@ -173,7 +184,8 @@ class UserHook {
       else this._warnOnce(key, `钩子返回的 ${key} 要是布尔值: ${String(out[key])}，忽略这一项`);
     }
     if (out.mode !== undefined && out.mode !== null) {
-      const mode = MODES.find((m) => m === String(out.mode));
+      // 只认字符串，不做 String() 转换（['cooldown'] 这种不该算对），与 Python 版一致
+      const mode = typeof out.mode === 'string' ? MODES.find((m) => m === out.mode) : undefined;
       if (mode) overrides.mode = mode;
       else this._warnOnce('mode', `钩子返回的 mode 要是 ${MODES.join('/')} 之一: ${String(out.mode)}，忽略这一项`);
     }

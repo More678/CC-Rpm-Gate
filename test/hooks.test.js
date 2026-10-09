@@ -197,6 +197,106 @@ test('钩子抛错 / 返回非法值：记一笔，然后按配置走', () => {
   }
 });
 
+test('返回值上的 getter 抛错也不会漏出 apply()', () => {
+  const tmp = tempDir();
+  try {
+    const user = new UserHook(tmp.write('getter.js',
+      'exports.onRetry = () => ({ get maxRetries() { throw new Error("getter boom"); } });'),
+    { logger: silentLogger });
+    const h = makeHook({ maxRetries: 2, cooldownMs: 1000 }, user);
+    assert.doesNotThrow(() => h.decide({ status: 429, attempt: 1 }));
+    assert.equal(h.decide({ status: 429, attempt: 1 }).action, 'retry', '按配置的 2 次走');
+    assert.equal(user.lastError, 'getter boom');
+
+    // Proxy 对象：读任何字段都抛
+    const proxy = new UserHook(tmp.write('proxy.js',
+      'exports.onRetry = () => new Proxy({}, { get() { throw new Error("trap"); } });'),
+    { logger: silentLogger });
+    assert.deepEqual(proxy.apply({ status: 429 }), {});
+    assert.equal(proxy.stats.errors, 1);
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test('数值字段只认真整数，不做类型转换（与 Python 版一致）', () => {
+  const tmp = tempDir();
+  try {
+    const user = new UserHook(tmp.write('loose.js',
+      'exports.onRetry = () => ({ maxRetries: true, cooldownMs: "", waitMs: [7], maxHoldMs: "5000", mode: ["cooldown"] });'),
+    { logger: silentLogger });
+    assert.deepEqual(user.apply({ status: 429 }), { overrides: {} }, 'true / "" / [7] / "5000" / [mode] 全部不算');
+
+    const ok = new UserHook(tmp.write('ok.js', 'exports.onRetry = () => ({ maxRetries: 3.0, cooldownMs: 0 });'),
+      { logger: silentLogger });
+    assert.deepEqual(ok.apply({ status: 429 }), { overrides: { maxRetries: 3, cooldownMs: 0 } }, '3.0 在 JS 里就是整数');
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test('.mjs：路径原样保留，加载时明确报「不支持」', () => {
+  const tmp = tempDir();
+  try {
+    assert.equal(resolveHookPath('h.mjs', tmp.dir), path.join(tmp.dir, 'h.mjs'));
+    const user = new UserHook(tmp.write('h.mjs', 'export const onRetry = () => ({ maxRetries: 9 });'),
+      { logger: silentLogger });
+    user.reloadIfChanged();
+    assert.equal(user.snapshot().loaded, false);
+    assert.match(user.lastError, /不支持 \.mjs/);
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test('proxy 兜底：decide() 本身抛错时按透传处理，名额收回', async () => {
+  const servers = [];
+  const listen = (handler) => new Promise((resolve) => {
+    const server = http.createServer(handler);
+    server.listen(0, '127.0.0.1', () => {
+      servers.push(server);
+      resolve(`http://127.0.0.1:${server.address().port}`);
+    });
+  });
+  try {
+    const upstreamUrl = await listen((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(429, { 'content-type': 'application/json' });
+        res.end('{"type":"error"}');
+      });
+    });
+    const cfg = {
+      host: '127.0.0.1', port: 0, upstream: upstreamUrl,
+      rpm: 1000, windowMs: 60000, limits: [], effectiveLimits: [{ windowMs: 60000, max: 1000 }],
+      maxConcurrent: 1, minGapMs: 0, maxQueue: 100, queueTimeoutMs: 2000,
+      penaltyMs: 1, maxPenaltyMs: 1, bypassPaths: [], upstreams: {},
+      retry: { ...DEFAULT_RETRY, maxRetries: 2 }, logFile: '', logLevel: 'silent',
+    };
+    const scheduler = new Scheduler(cfg, { logger: silentLogger });
+    const retryHook = new RetryHook(cfg.retry, { logger: silentLogger, userHook: null });
+    retryHook.decide = () => { throw new Error('decide exploded'); };
+    const gateUrl = await listen(createHandler(cfg, scheduler, silentLogger, { retryHook }));
+
+    const post = () => new Promise((resolve, reject) => {
+      const t = new URL(`${gateUrl}/v1/messages`);
+      const req = http.request({ hostname: t.hostname, port: t.port, path: t.pathname, method: 'POST',
+        headers: { 'content-length': 2 } }, (r) => { r.resume(); r.on('end', () => resolve(r.statusCode)); });
+      req.on('error', reject);
+      req.end('{}');
+    });
+    assert.equal(await post(), 429, '决策出错 → 透传上游的 429，不崩');
+    // maxConcurrent=1：名额没收回的话第二个请求会排队超时（504）
+    assert.equal(await post(), 429, '名额已收回，第二个请求照常处理');
+    scheduler.close();
+  } finally {
+    for (const s of servers) {
+      s.closeAllConnections?.();
+      await new Promise((done) => s.close(done));
+    }
+  }
+});
+
 test('热重载：改文件下一次就生效，坏文件保留上一个好版本', () => {
   const tmp = tempDir();
   try {

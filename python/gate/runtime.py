@@ -193,6 +193,10 @@ class GateRuntime:
 
             if self.scheduler is not None:
                 self.scheduler.reconfigure(live)
+            # 日志级别 / 文件：logger 对象被调度器、proxy、钩子共用，原地改它就全都生效
+            if self.logger is not None and (old.get("logLevel") != live.get("logLevel")
+                                            or old.get("logFile") != live.get("logFile")):
+                self.logger.reconfigure(live.get("logLevel", "info"), live.get("logFile", ""))
             if self.retry_hook is not None:
                 self.retry_hook.cfg = live["retry"]
                 # 钩子文件路径变了：重新建一个（空路径就等于关掉钩子）

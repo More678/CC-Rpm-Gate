@@ -36,6 +36,7 @@ class Logger:
         self._threshold = LEVELS.get(log_level, LEVELS["info"])
         self._lock = threading.Lock()
         self._stream: Optional[TextIO] = None
+        self._file = log_file
         # UI 版用它把日志同时显示在窗口里，命令行启动时是 None
         self.tap: Optional[Any] = None
 
@@ -72,6 +73,33 @@ class Logger:
             except Exception:
                 self.tap = None  # 界面已经关了，别再回调
 
+    def reconfigure(self, log_level: str, log_file: str) -> None:
+        """原地改级别和日志文件（UI 改配置后即时生效）。
+
+        调度器、proxy、重试钩子手里拿的都是这同一个对象，所以不换对象、只改它的状态。
+        新文件打不开时退回只写 stdout，和启动时的行为一样。
+        """
+        threshold = LEVELS.get(log_level, LEVELS["info"])
+        with self._lock:
+            old_file = getattr(self, "_file", "")
+            self._threshold = threshold
+            if log_file == old_file and (self._stream is not None or not log_file):
+                return
+            if self._stream is not None:
+                try:
+                    self._stream.close()
+                except OSError:
+                    pass
+                self._stream = None
+            self._file = log_file
+            if log_file and threshold < LEVELS["silent"]:
+                try:
+                    path = Path(log_file)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    self._stream = path.open("a", encoding="utf-8")
+                except OSError as err:
+                    _to_stdout(f"[gate] 无法打开日志文件 {log_file}: {err}\n")
+
     def debug(self, msg: str, extra: Any = None) -> None:
         self._write("debug", msg, extra)
 
@@ -102,6 +130,9 @@ class NullLogger(Logger):
 
     def _write(self, level: str, msg: str, extra: Any = None) -> None:
         return
+
+    def reconfigure(self, log_level: str, log_file: str) -> None:
+        return  # 测试用的静默日志器，改配置也保持静默
 
 
 def _safe_json(value: Any) -> str:

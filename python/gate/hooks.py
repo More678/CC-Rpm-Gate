@@ -64,7 +64,8 @@ class UserHook:
         self.last_error: Optional[str] = None    # 最近一次加载/调用错误
         self.stats = {"calls": 0, "overrides": 0, "forcedPassthrough": 0, "errors": 0, "reloads": 0}
         self._warned: Set[str] = set()           # 同一种非法返回值只提示一次
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()            # 计数、状态
+        self._reload_lock = threading.Lock()     # 重载（执行用户模块）
 
     @property
     def enabled(self) -> bool:
@@ -127,23 +128,31 @@ class UserHook:
         """调用钩子，返回 {"overrides": {...}} 或 {"deny": True}；空字典表示不干预。"""
         if not self.enabled:
             return {}
+        # 重载会执行用户模块的顶层代码，可能慢，所以单独一把锁。
+        # 已经有能用的旧版本时不排队：别的线程正在重载，这次先用旧版本；
+        # 一个版本都还没加载时必须等，否则首次加载期间的请求会悄悄跳过钩子。
+        if self._reload_lock.acquire(blocking=self.fn is None):
+            try:
+                self.reload_if_changed()
+            finally:
+                self._reload_lock.release()
         with self._lock:
-            self.reload_if_changed()
             fn = self.fn
             if fn is None:
                 return {}
             self.stats["calls"] += 1
 
+        # 调用和校验返回值都包在 try 里：返回一个 dict 子类、__repr__ 会抛的值，
+        # 校验阶段一样可能出错，不能漏给 proxy（那边漏了会让并发名额收不回来）
         try:
-            out = fn(ctx)
-        except Exception as err:  # 钩子抛错不能影响请求
+            return self._coerce(fn(ctx))
+        except Exception as err:  # 钩子出错不能影响请求
+            msg = _safe_str(err)
             with self._lock:
                 self.stats["errors"] += 1
-                self.last_error = str(err)
-            self._note("钩子抛错，这次按配置走: %s" % err)
+                self.last_error = msg
+            self._note("钩子出错，这次按配置走: %s" % msg)
             return {}
-
-        return self._coerce(out)
 
     def _coerce(self, out: Any) -> Dict[str, Any]:
         if out is False:
@@ -166,11 +175,16 @@ class UserHook:
             val = out.get(key)
             if val is None:
                 continue
+            # 规则与 Node 版一致：只认真整数（bool 不算），不做类型转换；
+            # 3.0 这种整数值的 float 在 JS 里就是整数，这里也认
+            if isinstance(val, float) and val.is_integer():
+                val = int(val)
             ok = isinstance(val, int) and not isinstance(val, bool) and val >= 0
             if ok and (key != "nextMinuteOffsetMs" or val < 60000):
                 overrides[key] = val
             else:
-                self._warn_once(key, "钩子返回的 %s 不合法（要 ≥ 0 的整数）: %r，忽略这一项" % (key, val))
+                self._warn_once(key, "钩子返回的 %s 不合法（要 ≥ 0 的整数）: %s，忽略这一项"
+                                % (key, _safe_repr(val)))
         for key in BOOL_FIELDS:
             val = out.get(key)
             if val is None:
@@ -178,14 +192,14 @@ class UserHook:
             if isinstance(val, bool):
                 overrides[key] = val
             else:
-                self._warn_once(key, "钩子返回的 %s 要是布尔值: %r，忽略这一项" % (key, val))
+                self._warn_once(key, "钩子返回的 %s 要是布尔值: %s，忽略这一项" % (key, _safe_repr(val)))
         mode = out.get("mode")
         if mode is not None:
-            if mode in MODES:
+            if isinstance(mode, str) and mode in MODES:
                 overrides["mode"] = mode
             else:
-                self._warn_once("mode", "钩子返回的 mode 要是 %s 之一: %r，忽略这一项"
-                                % ("/".join(MODES), mode))
+                self._warn_once("mode", "钩子返回的 mode 要是 %s 之一: %s，忽略这一项"
+                                % ("/".join(MODES), _safe_repr(mode)))
 
         if overrides:
             with self._lock:
@@ -214,6 +228,21 @@ class UserHook:
     def _note(self, message: str) -> None:
         if self.logger:
             self.logger.warn(message, {"file": self.file})
+
+
+def _safe_repr(val: Any) -> str:
+    """钩子返回的值可能是任意对象，__repr__ 自己也可能抛，打日志时别跟着出错。"""
+    try:
+        return repr(val)
+    except Exception:
+        return "<%s>" % type(val).__name__
+
+
+def _safe_str(err: BaseException) -> str:
+    try:
+        return str(err)
+    except Exception:
+        return type(err).__name__
 
 
 def create_user_hook(cfg: Dict[str, Any], logger: Any = None, root: Any = ROOT) -> UserHook:

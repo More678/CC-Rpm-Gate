@@ -155,6 +155,35 @@ class TestDecideWithHook(unittest.TestCase):
         h3 = make_hook(boolish, maxRetries=0)
         self.assertEqual(h3.decide(status=429, attempt=1)["reason"], "retry-disabled")
 
+    def test_hostile_return_values_never_escape(self) -> None:
+        """返回 dict 子类 / __repr__ 会抛的值：都在 apply() 里兜住，不漏给 proxy。"""
+        u = self.user("hostile.py",
+                      "class D(dict):\n"
+                      "    def get(self, *a, **k):\n"
+                      "        raise RuntimeError('get boom')\n"
+                      "class R:\n"
+                      "    def __repr__(self):\n"
+                      "        raise RuntimeError('repr boom')\n"
+                      "MODE = {'n': 0}\n"
+                      "def on_retry(ctx):\n"
+                      "    MODE['n'] += 1\n"
+                      "    return D() if MODE['n'] == 1 else {'maxRetries': R()}\n")
+        h = make_hook(u, maxRetries=2, cooldownMs=1000)
+        self.assertEqual(h.decide(status=429, attempt=1)["action"], "retry", "dict 子类抛错 → 按配置走")
+        self.assertEqual(u.last_error, "get boom")
+        self.assertEqual(h.decide(status=429, attempt=1)["action"], "retry", "__repr__ 抛错 → 这一项忽略")
+
+    def test_number_rules_match_node(self) -> None:
+        """数值字段只认真整数：True / '' / [7] / '5000' / ['cooldown'] 都不算，3.0 算。"""
+        u = self.user("loose.py", "def on_retry(ctx):\n"
+                                  "    return {'maxRetries': True, 'cooldownMs': '', 'waitMs': [7],"
+                                  " 'maxHoldMs': '5000', 'mode': ['cooldown']}\n")
+        self.assertEqual(u.apply({"status": 429}), {"overrides": {}})
+        ok = self.user("ok.py", "def on_retry(ctx):\n    return {'maxRetries': 3.0, 'cooldownMs': 0}\n")
+        out = ok.apply({"status": 429})
+        self.assertEqual(out, {"overrides": {"maxRetries": 3, "cooldownMs": 0}})
+        self.assertIs(type(out["overrides"]["maxRetries"]), int)
+
     def test_hot_reload(self) -> None:
         """改文件下一次就生效，坏文件保留上一个好版本。"""
         path = self.tmp.write("h.py", "def on_retry(ctx):\n    return {'maxRetries': 2}\n")
@@ -242,6 +271,37 @@ class TestHookConfig(unittest.TestCase):
             normalize_retry({"hook": 42})
         cfg = load_config(file=None, env={"GATE_RETRY_HOOK": "env.py"})
         self.assertEqual(cfg["retry"]["hook"], "env.py")
+
+
+class TestDecideFailureReleasesSlot(unittest.TestCase):
+    def test_decide_raising_passes_through_and_frees_slot(self) -> None:
+        """decide() 本身抛错：按透传处理，并发名额照样收回（maxConcurrent=1 下第二个请求不会卡住）。"""
+        from gate.proxy import make_handler_class
+        from gate.server import build
+
+        up = LimitedUpstream(self, 99)
+        cfg = make_cfg(up.url, maxConcurrent=1, queueTimeoutMs=2000)
+        cfg["retry"] = {**DEFAULT_RETRY, "maxRetries": 2}
+        server, scheduler, _log, cfg = build(cfg, NullLogger(), with_retry=False)
+        retry_hook = RetryHook(cfg["retry"], logger=NullLogger(), user_hook=None)
+
+        def explode(**_kw: Any) -> Dict[str, Any]:
+            raise RuntimeError("decide exploded")
+        retry_hook.decide = explode  # type: ignore[assignment]
+        server.RequestHandlerClass = make_handler_class(cfg, scheduler, NullLogger(), retry_hook)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+        thread.start()
+
+        def close() -> None:
+            scheduler.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+        self.addCleanup(close)
+
+        self.assertEqual(http_request(cfg["port"], body=b"{}")[0], 429, "透传上游的 429")
+        self.assertEqual(http_request(cfg["port"], body=b"{}")[0], 429, "名额已收回，不是 504")
+        self.assertEqual(scheduler.in_flight, 0)
 
 
 class TestHookEndToEnd(unittest.TestCase):

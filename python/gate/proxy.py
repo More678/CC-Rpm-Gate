@@ -319,14 +319,20 @@ def make_handler_class(
                 # 被拦下来的限流响应：问钩子是重试还是透传
                 if result.get("captured") is not None:
                     last_captured = result["captured"]
-                decision = retry_hook.decide(
-                    status=status,
-                    attempt=attempt,
-                    held_ms=held_ms,
-                    retry_after_ms=result.get("retryAfterMs"),
-                    overrides=overrides,
-                    meta=meta,
-                )
+                try:
+                    decision = retry_hook.decide(
+                        status=status,
+                        attempt=attempt,
+                        held_ms=held_ms,
+                        retry_after_ms=result.get("retryAfterMs"),
+                        overrides=overrides,
+                        meta=meta,
+                    )
+                except Exception as err:
+                    # 兜底：决策出错就按透传走。不兜的话异常往上冒，
+                    # 下面的 slot.release() 跑不到，这个并发名额就永远收不回来了
+                    logger.error("重试决策出错，按透传处理", {**meta, "error": repr(err)})
+                    decision = {"action": "passthrough", "reason": "error"}
 
                 if decision["action"] == "retry" and last_captured is not None:
                     # 冷却按暂存时长精确设置：这段时间里所有窗口一起等，别人别去白跑

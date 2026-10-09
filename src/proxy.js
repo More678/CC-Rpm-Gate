@@ -462,14 +462,22 @@ function createHandler(cfg, scheduler, logger, deps = {}) {
 
       // 被拦下来的限流响应：问钩子是重试还是透传
       if (result.captured) lastCaptured = result.captured;
-      const decision = retryHook.decide({
-        status: result.status,
-        attempt,
-        heldMs,
-        retryAfterMs: result.retryAfterMs,
-        overrides,
-        meta,
-      });
+      let decision;
+      try {
+        decision = retryHook.decide({
+          status: result.status,
+          attempt,
+          heldMs,
+          retryAfterMs: result.retryAfterMs,
+          overrides,
+          meta,
+        });
+      } catch (err) {
+        // 兜底：决策出错就按透传走。这里是 async 处理函数，抛出去就是未处理的
+        // rejection，会把整个闸门进程带走，名额也收不回来
+        logger.error('重试决策出错，按透传处理', { ...meta, error: err && err.message });
+        decision = { action: 'passthrough', reason: 'error' };
+      }
 
       if (decision.action === 'retry' && lastCaptured) {
         // 冷却按暂存时长精确设置：这段时间里所有窗口一起等，别人别去白跑

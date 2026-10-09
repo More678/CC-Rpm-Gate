@@ -17,7 +17,7 @@ const DEFAULT_RETRY = {
   respectRetryAfter: true,     // 上游 Retry-After 比冷却更久时听上游的
   maxHoldMs: 180000,           // 单个请求累计最多被暂存多久，超了就透传 429
   maxStashed: 50,              // 同时暂存的请求数上限，超了就透传 429
-  // 用户钩子文件：留空时看默认的 gate.hooks.js / gate_hooks.py 在不在，
+  // 用户钩子文件：留空时看默认的 gate.hooks.js 在不在（Python 版看 gate.hooks.py），
   // 在就加载。钩子能按请求改这次的重试次数和等待方式，见 src/hooks.js
   hook: '',
 };

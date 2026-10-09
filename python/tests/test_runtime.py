@@ -239,6 +239,34 @@ class TestRuntime(unittest.TestCase):
             second.start(runtime_cfg(up.url, port=first.cfg["port"]))
         self.assertFalse(second.running)
 
+    def test_apply_log_level_and_file_live(self) -> None:
+        """改日志级别 / 日志文件：同一个 logger 对象原地生效，调度器和 proxy 也跟着用新的。"""
+        tmp = tempfile.mkdtemp(prefix="gate-rt-log-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        first, second = Path(tmp, "a.log"), Path(tmp, "b.log")
+
+        up = FakeUpstream(self)
+        log = Logger("silent", "")
+        rt = GateRuntime(logger=log)
+        self.addCleanup(rt.close)
+        rt.start(runtime_cfg(up.url))
+        self.assertIs(rt.scheduler.logger, log)
+
+        rt.apply(dict(rt.cfg, logLevel="info", logFile=str(first)))
+        rt.logger.info("to-a")
+        rt.apply(dict(rt.cfg, logFile=str(second)))
+        rt.logger.info("to-b")
+        rt.apply(dict(rt.cfg, logLevel="error"))
+        rt.logger.info("dropped")
+        log.close()
+
+        self.assertIs(rt.logger, log, "没换对象，别人手里的引用依然有效")
+        self.assertIn("to-a", first.read_text(encoding="utf-8"))
+        b = second.read_text(encoding="utf-8")
+        self.assertIn("to-b", b)
+        self.assertNotIn("to-b", first.read_text(encoding="utf-8"), "换文件后旧文件不再写")
+        self.assertNotIn("dropped", b, "级别调到 error 后 info 不再输出")
+
     def test_describe_changes(self) -> None:
         a = load_config(file=None, env={})
         b = dict(a, rpm=a["rpm"] + 1, retry={**a["retry"], "mode": "nextMinute"})

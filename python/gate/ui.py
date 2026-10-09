@@ -356,7 +356,13 @@ class GateWindow:
             self._dirty = False
             self.hint.configure(text="")
             return
-        self._note("已生效：" + "；".join(changes))
+        # host / port 这两项要重启才生效，别和其它改动一起说成「已生效」
+        pending = [c for c in changes if c.split(":", 1)[0] in ("host", "port")]
+        applied = [c for c in changes if c not in pending]
+        if applied:
+            self._note("已生效：" + "；".join(applied))
+        if pending:
+            self._note("待重启后生效：" + "；".join(pending))
         self._dirty = False
         if needs_restart:
             self.hint.configure(text="监听地址改了，需要重启闸门")
