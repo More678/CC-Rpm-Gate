@@ -1,0 +1,38 @@
+{
+  "port": 17530,
+  "host": "127.0.0.1",
+  "upstream": "http://127.0.0.1:17521",
+
+  "rpm": 20,
+  "windowMs": 60000,
+
+  "limits": [
+    { "seconds": 10, "max": 5 },
+    { "seconds": 1, "max": 2 }
+  ],
+
+  "maxConcurrent": 2,
+  "minGapMs": 300,
+  "maxQueue": 200,
+  "queueTimeoutMs": 600000,
+  "penaltyMs": 15000,
+  "maxPenaltyMs": 120000,
+  "bypassPaths": ["/v1/messages/count_tokens"],
+
+  "retry": {
+    "enabled": true,
+    "maxRetries": 2,
+    "statuses": [429, 529],
+    "mode": "cooldown",
+    "cooldownMs": 15000,
+    "nextMinuteOffsetMs": 1000,
+    "respectRetryAfter": true,
+    "maxHoldMs": 180000,
+    "maxStashed": 50
+  },
+
+  "upstreams": {},
+
+  "logFile": "logs/gate.log",
+  "logLevel": "info"
+}

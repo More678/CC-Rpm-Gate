@@ -1,0 +1,34 @@
+{
+  "name": "cc-rpm-gate",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Claude Code / pi 本地请求排队闸门：多窗口统一限流，429 自动暂存重试",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "pi",
+    "rate-limit",
+    "rpm",
+    "429",
+    "proxy",
+    "queue",
+    "anthropic"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/More678/CC-Rpm-Gate.git"
+  },
+  "homepage": "https://github.com/More678/CC-Rpm-Gate#readme",
+  "bugs": {
+    "url": "https://github.com/More678/CC-Rpm-Gate/issues"
+  },
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {}
+}

@@ -1,0 +1,30 @@
+# 运行时产物
+logs/
+*.log
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 本地开发记录：含本机环境细节（端口、备份文件名、本地工具行为），不公开
+TASK_*.md
+PROGRESS_*.md
+
+# 本地临时文件
+_smoke.py
+_pi_check.js
+_probe.bat
+out*.txt
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 任何可能放密钥的文件
+.env
+.env.*
+*.pem
+*.key
+auth.json

@@ -1,0 +1,8 @@
+# 仓库内统一存 LF，检出时按各平台习惯处理
+* text=auto
+
+# Windows 启动脚本必须是 CRLF。
+# 纯 LF 的 .bat 在 cmd.exe 下会被拆断执行（中文注释行尤其明显），
+# 所以这里强制检出为 CRLF，不受 clone 平台和 core.autocrlf 影响。
+*.bat text eol=crlf
+*.cmd text eol=crlf
