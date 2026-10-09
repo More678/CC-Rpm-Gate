@@ -1,5 +1,5 @@
 @echo off
-rem Launch pi through cc-rpm-gate. Chinese docs: pi\README.md
+rem Launch pi through cc-rpm-gate. Docs: pi\README.md (en), pi\README.zh-CN.md (zh)
 rem
 rem This file is deliberately ASCII-only. Reason, measured on this repo:
 rem   cmd.exe tracks a byte offset while parsing a .bat, but counts

@@ -1,39 +1,44 @@
-# pi 接入 cc-rpm-gate
+# Connecting pi to cc-rpm-gate
 
-让 pi（earendil-works/pi）和 Claude Code 各窗口共用同一套限流与 429 暂存重试。
+English | [简体中文](README.zh-CN.md)
 
-## 为什么不能像 Claude Code 那样设环境变量
+Lets pi (earendil-works/pi) share one rate limit and one 429 stash-and-retry queue
+with every Claude Code window.
 
-Claude Code 认 `ANTHROPIC_BASE_URL`，pi 不认。
+## Why an environment variable is not enough
 
-pi 建 Anthropic 客户端时是显式传 `baseURL: model.baseUrl` 的
-（`dist/bundle/chunks/*.js` 里 `new Anthropic({ ..., baseURL: model.baseUrl })`），
-构造参数盖掉了 SDK 从环境变量取的默认值。所以改 pi 的上游地址只有两条路：
+Claude Code reads `ANTHROPIC_BASE_URL`; pi does not.
 
-- 改 `~/.pi/agent/models.json` 里 provider 的 `baseUrl`（永久生效，会被 pi 自己的工具改写）
-- 用扩展调 `pi.registerProvider(name, { baseUrl, headers })`（只对当前进程生效）
+pi passes `baseURL: model.baseUrl` explicitly when it builds the Anthropic client
+(`new Anthropic({ ..., baseURL: model.baseUrl })` in `dist/bundle/chunks/*.js`), and the
+constructor argument wins over the default the SDK would take from the environment. That
+leaves two ways to change pi's upstream:
 
-这里走第二条。按 pi 文档，只注册 `baseUrl` / `headers` 时，该 provider 原有的模型列表会保留。
+- edit the provider's `baseUrl` in `~/.pi/agent/models.json` (permanent, and pi's own tools may rewrite it)
+- call `pi.registerProvider(name, { baseUrl, headers })` from an extension (current process only)
 
-## 用法
+This extension takes the second path. Per the pi docs, registering only `baseUrl` / `headers`
+keeps the provider's existing model list.
+
+## Usage
 
 ```
-connect-via-gate-pi.bat            # 参数原样透传给 pi
+connect-via-gate-pi.bat            # arguments are passed through to pi
 set "GATE_PORT=17540" && connect-via-gate-pi.bat
 ```
 
-引号要加上：写成 `set GATE_PORT=17540 && ...` 会把 `&&` 前的空格吃进变量。
+Keep the quotes: `set GATE_PORT=17540 && ...` would put the space before `&&` into the variable.
 
-不走脚本：
+Without the launcher:
 
 ```
-pi -e "<项目路径>\cc-rpm-gate\pi\gate-extension.ts"
+pi -e "<project path>\cc-rpm-gate\pi\gate-extension.ts"
 ```
 
-## 先配好命名上游
+## Configure named upstreams first
 
-pi 的每个 provider 各有自己的 `baseUrl`，而闸门默认只有一个上游，
-所以要在 `gate.config.json` 的 `upstreams` 里按 **pi 的 provider 名字** 写上它的真实地址：
+Every pi provider has its own `baseUrl`, while the gate has a single default upstream. So add each
+provider's real address to `upstreams` in `gate.config.json`, keyed by **pi's provider name**:
 
 ```json
 "upstreams": {
@@ -41,50 +46,57 @@ pi 的每个 provider 各有自己的 `baseUrl`，而闸门默认只有一个上
 }
 ```
 
-闸门随即接受 `/__gate/u/myprovider/v1/messages` 这样的路径，转发到对应上游。
-扩展启动时向 `/__gate/status` 问一遍有哪些命名上游，再把同名 provider 的
-`baseUrl` 指到 `/__gate/u/<名字>`，所以上游地址只有 `gate.config.json` 一份，不用两边抄。
+The gate then accepts paths like `/__gate/u/myprovider/v1/messages` and forwards them to that upstream.
+On startup the extension asks `/__gate/status` which named upstreams exist and points the `baseUrl`
+of each provider with the same name at `/__gate/u/<name>`. The upstream address therefore lives in
+`gate.config.json` only, with nothing to copy between the two.
 
-没配 `upstreams` 时扩展会在启动时提示，并且不改任何 provider（pi 照常直连上游）。
+If no `upstreams` are configured, the extension says so on startup and leaves every provider alone
+(pi keeps talking to its upstreams directly).
 
-## 扩展做了什么
+## What the extension does
 
-| 行为 | 说明 |
-|------|------|
-| 改 `baseUrl` | 每个命名上游对应的 provider 指到 `/__gate/u/<名字>` |
-| 加请求头 | `x-gate-window: pi-<pid>`，闸门日志里用来区分是哪个 pi 窗口 |
-| `/gate` 命令 | 在 pi 里查当前排队数、限流用量、冷却剩余、暂存数、重试次数 |
+| Behavior | Details |
+|----------|---------|
+| Rewrites `baseUrl` | Each provider that has a named upstream is pointed at `/__gate/u/<name>` |
+| Adds a header | `x-gate-window: pi-<pid>`, so the gate log can tell pi windows apart |
+| `/gate` command | Shows queue depth, rate-limit usage, cooldown remaining, stash count and retry counters from inside pi |
 
-## 建议把 pi 自己的重试调小
+## Turn pi's own retries down
 
-闸门已经在扛 429 了（默认最多重试 2 次，可配）。pi 再叠一层重试只会让同一个请求
-在两层之间来回等。`~/.pi/agent/settings.json` 里的 `retry.*` 建议降下来：
+The gate already absorbs 429s (2 retries by default, configurable). Stacking pi's retries on top only
+makes the same request wait back and forth between two layers. Lower `retry.*` in
+`~/.pi/agent/settings.json`:
 
 ```json
 "retry": { "enabled": true, "maxRetries": 3, "baseDelayMs": 2000, "maxAgentDelayMs": 60000 }
 ```
 
-（这是 pi 的默认值。如果你之前为了扛 429 把它调得很大，比如几十次重试、十几秒起步的退避，
-配合闸门的暂存重试就会显得过于激进。）
+(These are pi's defaults. If you raised them earlier to survive 429s, for example dozens of retries
+with a backoff starting above ten seconds, they become overly aggressive once the gate stashes and
+retries for you.)
 
-pi 的 `retry.provider.maxRetries` 保持 `0`，pi 文档也建议如此。
+Keep pi's `retry.provider.maxRetries` at `0`, as the pi docs also recommend.
 
-## 注意：bat 文件必须全 ASCII
+## Note: the .bat file must be pure ASCII
 
-`connect-via-gate-pi.bat` 里一个非 ASCII 字符都没有，这是刻意的。
+`connect-via-gate-pi.bat` contains no non-ASCII characters at all, on purpose.
 
-cmd.exe 解析 .bat 时按字节记偏移，但在 `chcp 65001` 下按字符数，两者对不上就会
-在某处「跑偏」，之后从一行中间继续执行，于是把半行当命令跑，报
-`'XX' 不是内部或外部命令`。落点取决于文件的具体字节布局：
+cmd.exe tracks its position in a `.bat` file as a byte offset, but under `chcp 65001` it counts
+characters. When the two disagree it drifts and resumes execution from the middle of a line, runs half
+a line as a command, and reports `'XX' is not recognized as an internal or external command`. Where
+it lands depends on the exact byte layout of the file:
 
-- 本文件最初带中文注释，实测报 4~7 处拆行错误
-- 把中文注释换成 ASCII 后仍剩 3 处（中文 `echo` 行也会触发）
-- 全部 ASCII 后为 0 处
+- the file originally had Chinese comments: 4 to 7 split-line errors in testing
+- with the comments switched to ASCII: still 3 (Chinese `echo` lines trigger it too)
+- fully ASCII: 0
 
-`connect-via-gate.bat` 目前带中文也不报错，属于字节布局碰巧对齐，改动后可能复现，
-所以给它加了同样的说明。中文提示由扩展（Node 写 UTF-8）打印，不受这个问题影响。
+`connect-via-gate.bat` still contains Chinese and currently runs clean, but only because its byte layout
+happens to line up; an edit could bring the problem back, so it carries the same warning. Chinese
+messages are printed by the extension instead (Node writes UTF-8), which is not affected.
 
-验证方法（不要用 MSYS 的 `cmd //c`，那层包装本身会干扰）：
+How to verify (do not use MSYS `cmd //c`; that wrapper interferes by itself). The second match string
+is the Chinese-locale form of the same cmd.exe error:
 
 ```python
 import pathlib, subprocess

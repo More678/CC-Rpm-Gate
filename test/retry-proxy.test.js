@@ -22,7 +22,12 @@ function listen(handler) {
       server,
       port: server.address().port,
       url: `http://127.0.0.1:${server.address().port}`,
-      close: () => new Promise((done) => server.close(done)),
+      // Node 18 的 server.close() 不会断开空闲的 keep-alive 连接（19+ 才会），
+      // 闸门到上游的连接池会让 close 一直等下去，这里手动断开
+      close: () => new Promise((done) => {
+        server.close(done);
+        server.closeAllConnections?.();
+      }),
     }));
   });
 }

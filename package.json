@@ -2,7 +2,7 @@
   "name": "cc-rpm-gate",
   "version": "1.1.0",
   "private": true,
-  "description": "Claude Code / pi 本地请求排队闸门：多窗口统一限流，429 自动暂存重试",
+  "description": "Local request gate for Claude Code and pi: one shared rate limit across windows, with automatic 429 stash-and-retry. | Claude Code / pi 本地请求排队闸门：多窗口统一限流，429 自动暂存重试",
   "license": "MIT",
   "keywords": [
     "claude-code",

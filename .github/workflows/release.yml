@@ -1,9 +1,10 @@
 name: Release
+run-name: Release ${{ github.ref_type == 'tag' && github.ref_name || 'from main' }}
 
-# 两种触发方式：
-# 1. push 到 main：读 package.json 的版本号，如果对应 tag 还没发布过就自动发一版
-# 2. push 一个 v* tag：按 tag 上的版本号发布
-# 两种都会先跑完整测试矩阵，测试不过不发版。
+# Two ways in:
+#   1. push to main  - read the version from package.json and publish it if that tag does not exist yet
+#   2. push a v* tag - publish the version carried by the tag
+# Both run the full test matrix first; a failing matrix blocks the release.
 on:
   push:
     branches: [main]
@@ -13,15 +14,17 @@ on:
 permissions:
   contents: read
 
-# 同一时间只跑一个发布流程，避免 main 推送和 tag 推送撞车重复建 release
+# Only one release at a time, so a main push and a tag push cannot race
+# into creating the same release twice.
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
   prepare:
-    name: 确定版本
+    name: Resolve version
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
@@ -32,7 +35,7 @@ jobs:
           fetch-depth: 0
 
       - id: v
-        name: 读取版本号，判断是否需要发布
+        name: Read version and decide whether to publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -42,7 +45,7 @@ jobs:
             VERSION="${TAG#v}"
             PKG_V=$(node -p "require('./package.json').version")
             if [ "$VERSION" != "$PKG_V" ]; then
-              echo "::error::tag 是 $TAG，但 package.json 的版本号是 $PKG_V，先对齐再发版"
+              echo "::error::tag is $TAG but package.json says $PKG_V; align them before releasing"
               exit 1
             fi
           else
@@ -52,53 +55,55 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "$TAG 已经发布过，这次跳过"
+            echo "$TAG is already released, skipping"
             echo "release=false" >> "$GITHUB_OUTPUT"
           else
-            echo "准备发布 $TAG"
+            echo "Will release $TAG"
             echo "release=true" >> "$GITHUB_OUTPUT"
           fi
 
   test:
-    name: 测试
+    name: Test
     needs: prepare
     if: needs.prepare.outputs.release == 'true'
     uses: ./.github/workflows/ci.yml
 
   publish:
-    name: 打包发布
+    name: Package and publish
     needs: [prepare, test]
     if: needs.prepare.outputs.release == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
-      contents: write   # 建 tag 和 release 需要写权限
+      contents: write   # creating the tag and the release needs write access
     steps:
       - uses: actions/checkout@v4
 
-      - name: 打运行时压缩包
+      - name: Build runtime archives
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           DIR="cc-rpm-gate-$VERSION"
-          # 只带运行需要的东西：两套实现 + 配置 + 启动脚本 + pi 扩展，
-          # 测试、CI 配置不进包
+          # Ship only what is needed to run: both implementations, the config,
+          # the launchers and the pi extension. Tests and CI config stay out.
           mkdir -p "dist/$DIR/python"
           cp -r src "dist/$DIR/src"
           cp -r python/gate "dist/$DIR/python/gate"
           cp -r pi "dist/$DIR/pi"
-          cp gate.config.json gate-settings.json package.json README.md LICENSE "dist/$DIR"/
+          cp gate.config.json gate-settings.json package.json LICENSE "dist/$DIR"/
+          cp README.md README.zh-CN.md "dist/$DIR"/
           cp ./*.bat "dist/$DIR"/
           find "dist/$DIR" -name '__pycache__' -type d -prune -exec rm -rf {} +
           find "dist/$DIR" -name '*.pyc' -delete
 
-          # .gitattributes 要求 .bat 检出为 CRLF，这里确认打包产物真的是 CRLF。
-          # 用字节数比对而不是 grep：grep 判断 CR 在不同实现上结果不一致。
+          # .gitattributes checks .bat files out as CRLF; confirm the archive really has them.
+          # Compare byte counts instead of using grep: grep's CR detection differs between builds.
           for f in "dist/$DIR"/*.bat; do
             lines=$(wc -l < "$f")
             crs=$(tr -dc '\r' < "$f" | wc -c)
             if [ "$lines" -ne "$crs" ]; then
-              echo "::error::$f 不是全 CRLF 行尾（行数 $lines，CR $crs），Windows 下会执行异常"
+              echo "::error::$f is not fully CRLF ($lines lines, $crs CRs); it would misbehave on Windows"
               exit 1
             fi
           done
@@ -109,19 +114,50 @@ jobs:
           sha256sum "$DIR.zip" "$DIR.tar.gz" > SHA256SUMS.txt
           ls -la
 
-      - name: 创建 Release
+      - name: Write release notes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Local request gate for Claude Code and pi: one shared rate limit across every window, with automatic 429 stash-and-retry."
+            echo
+            echo "### Downloads"
+            echo
+            echo "| File | Contents |"
+            echo "| --- | --- |"
+            echo "| \`cc-rpm-gate-$VERSION.zip\` | Node + Python implementations, config, launchers, pi extension |"
+            echo "| \`cc-rpm-gate-$VERSION.tar.gz\` | Same contents, tar.gz |"
+            echo "| \`SHA256SUMS.txt\` | Checksums for both archives |"
+            echo
+            echo "Verify before unpacking:"
+            echo
+            echo '```'
+            echo "sha256sum -c SHA256SUMS.txt"
+            echo '```'
+            echo
+            echo "### Requirements"
+            echo
+            echo "Node 18+ for the Node implementation, Python 3.8+ for the Python one. No third-party dependencies either way."
+            echo
+            echo "Docs: [English](https://github.com/More678/CC-Rpm-Gate/blob/main/README.md) | [简体中文](https://github.com/More678/CC-Rpm-Gate/blob/main/README.zh-CN.md)"
+          } > notes.md
+          cat notes.md
+
+      - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.prepare.outputs.tag }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          # tag 不存在时在当前 commit 上建（push 到 main / 手动触发的情况）
+          # Creates the tag on the current commit when it does not exist yet
+          # (the push-to-main and workflow_dispatch paths).
           gh release create "$TAG" \
             --target "${{ github.sha }}" \
             --title "$TAG" \
-            --generate-notes \
+            --notes-file notes.md \
             "dist/cc-rpm-gate-$VERSION.zip" \
             "dist/cc-rpm-gate-$VERSION.tar.gz" \
             "dist/SHA256SUMS.txt"
-
+          echo "Published: https://github.com/${{ github.repository }}/releases/tag/$TAG"

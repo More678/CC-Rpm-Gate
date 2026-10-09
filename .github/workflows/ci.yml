@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  # 给 release.yml 复用，避免测试步骤写两遍
+  # Reused by release.yml so the test matrix is defined once.
   workflow_call:
 
 permissions:
@@ -15,6 +15,7 @@ jobs:
   node:
     name: Node ${{ matrix.node }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -24,17 +25,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      # 零第三方依赖，不需要 npm install
-      - run: npm test
+      # No third-party dependencies, so there is nothing to install.
+      - name: Run Node test suite
+        run: npm test
 
   python:
     name: Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         include:
-          # 3.8 在 ubuntu-24.04 的 setup-python 里已经没有构建产物，固定到 22.04
+          # setup-python no longer ships a 3.8 build for ubuntu-24.04, so pin that leg to 22.04.
           - python: '3.8'
             os: ubuntu-22.04
           - python: '3.10'
@@ -46,22 +49,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m unittest discover -s tests -v
+      - name: Run Python test suite
+        run: python -m unittest discover -s tests -v
         working-directory: python
 
   version-sync:
-    name: 版本号一致性
+    name: Version sync
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      # package.json 和 python/gate/__init__.py 的版本号必须一致，
-      # 否则 release 会打出两个版本号不同的产物
-      - name: 检查两版版本号是否一致
+      # package.json and python/gate/__init__.py must agree, otherwise a release
+      # would ship two implementations claiming different versions.
+      - name: Compare Node and Python versions
         run: |
           NPM_V=$(node -p "require('./package.json').version")
           PY_V=$(python -c "import re,pathlib;print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('python/gate/__init__.py').read_text()).group(1))")
           echo "package.json=$NPM_V  python=$PY_V"
           if [ "$NPM_V" != "$PY_V" ]; then
-            echo "::error::版本号不一致：package.json=$NPM_V，python/gate/__init__.py=$PY_V"
+            echo "::error::version mismatch: package.json=$NPM_V, python/gate/__init__.py=$PY_V"
             exit 1
           fi
