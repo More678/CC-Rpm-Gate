@@ -1,0 +1,124 @@
+name: Release
+
+# 两种触发方式：
+# 1. push 到 main：读 package.json 的版本号，如果对应 tag 还没发布过就自动发一版
+# 2. push 一个 v* tag：按 tag 上的版本号发布
+# 两种都会先跑完整测试矩阵，测试不过不发版。
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一时间只跑一个发布流程，避免 main 推送和 tag 推送撞车重复建 release
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: 确定版本
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: v
+        name: 读取版本号，判断是否需要发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+            VERSION="${TAG#v}"
+            PKG_V=$(node -p "require('./package.json').version")
+            if [ "$VERSION" != "$PKG_V" ]; then
+              echo "::error::tag 是 $TAG，但 package.json 的版本号是 $PKG_V，先对齐再发版"
+              exit 1
+            fi
+          else
+            VERSION=$(node -p "require('./package.json').version")
+            TAG="v$VERSION"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG 已经发布过，这次跳过"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "准备发布 $TAG"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    name: 测试
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: 打包发布
+    needs: [prepare, test]
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 建 tag 和 release 需要写权限
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 打运行时压缩包
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          DIR="cc-rpm-gate-$VERSION"
+          # 只带运行需要的东西：两套实现 + 配置 + 启动脚本 + pi 扩展，
+          # 测试、CI 配置不进包
+          mkdir -p "dist/$DIR/python"
+          cp -r src "dist/$DIR/src"
+          cp -r python/gate "dist/$DIR/python/gate"
+          cp -r pi "dist/$DIR/pi"
+          cp gate.config.json gate-settings.json package.json README.md LICENSE "dist/$DIR"/
+          cp ./*.bat "dist/$DIR"/
+          find "dist/$DIR" -name '__pycache__' -type d -prune -exec rm -rf {} +
+          find "dist/$DIR" -name '*.pyc' -delete
+
+          # .gitattributes 要求 .bat 检出为 CRLF，这里确认打包产物真的是 CRLF
+          for f in "dist/$DIR"/*.bat; do
+            if ! grep -qU $'\r' "$f"; then
+              echo "::error::$f 不是 CRLF 行尾，Windows 下会执行异常"
+              exit 1
+            fi
+          done
+
+          cd dist
+          zip -qr "$DIR.zip" "$DIR"
+          tar -czf "$DIR.tar.gz" "$DIR"
+          sha256sum "$DIR.zip" "$DIR.tar.gz" > SHA256SUMS.txt
+          ls -la
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          # tag 不存在时在当前 commit 上建（push 到 main / 手动触发的情况）
+          gh release create "$TAG" \
+            --target "${{ github.sha }}" \
+            --title "$TAG" \
+            --generate-notes \
+            "dist/cc-rpm-gate-$VERSION.zip" \
+            "dist/cc-rpm-gate-$VERSION.tar.gz" \
+            "dist/SHA256SUMS.txt"
+
