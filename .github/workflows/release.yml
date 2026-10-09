@@ -92,10 +92,13 @@ jobs:
           find "dist/$DIR" -name '__pycache__' -type d -prune -exec rm -rf {} +
           find "dist/$DIR" -name '*.pyc' -delete
 
-          # .gitattributes 要求 .bat 检出为 CRLF，这里确认打包产物真的是 CRLF
+          # .gitattributes 要求 .bat 检出为 CRLF，这里确认打包产物真的是 CRLF。
+          # 用字节数比对而不是 grep：grep 判断 CR 在不同实现上结果不一致。
           for f in "dist/$DIR"/*.bat; do
-            if ! grep -qU $'\r' "$f"; then
-              echo "::error::$f 不是 CRLF 行尾，Windows 下会执行异常"
+            lines=$(wc -l < "$f")
+            crs=$(tr -dc '\r' < "$f" | wc -c)
+            if [ "$lines" -ne "$crs" ]; then
+              echo "::error::$f 不是全 CRLF 行尾（行数 $lines，CR $crs），Windows 下会执行异常"
               exit 1
             fi
           done
