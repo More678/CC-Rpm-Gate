@@ -92,6 +92,7 @@ jobs:
           cp -r python/gate "dist/$DIR/python/gate"
           cp -r pi "dist/$DIR/pi"
           cp gate.config.json gate-settings.json package.json LICENSE "dist/$DIR"/
+          cp gate.hooks.example.js gate.hooks.example.py "dist/$DIR"/
           cp README.md README.zh-CN.md "dist/$DIR"/
           cp ./*.bat "dist/$DIR"/
           find "dist/$DIR" -name '__pycache__' -type d -prune -exec rm -rf {} +

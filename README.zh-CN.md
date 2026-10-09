@@ -22,6 +22,8 @@ Node 和 Python 两套实现功能对等，共用同一份 `gate.config.json`，
 - 429 暂存重试：上游限流时闸门自己等、自己重发，两种模式：
   - `cooldown`：固定冷却若干秒（上游 `Retry-After` 更久则听上游的）
   - `nextMinute`：暂存到下一分钟的第 00 或 01 秒，适合按整分钟重置配额的上游
+- 重试钩子：用一个小 JS / Python 文件按请求改重试次数和等待方式，保存即生效
+- 图形界面（Python 版）：改配置直接作用到运行中的闸门，客户端的 URL 一个都不用改
 - 冷却期间所有窗口一起等，不会有别的窗口抢着去撞限流
 - SSE 流式响应边读边写，不缓冲
 - 状态接口 `/__gate/status`：排队数、窗口用量、冷却剩余、暂存数、重试统计
@@ -42,6 +44,21 @@ cd python && python -m gate # Windows 也可以双击 start-gate-py.bat
 ```
 
 两版监听同一端口（默认 17530），只能起一个。
+
+### 图形界面（Python 版）
+
+```bash
+cd python && python -m gate --ui   # Windows 也可以双击 start-gate-ui.bat
+```
+
+tkinter 窗口（标准库，不用装任何东西），闸门跑在同一个进程里。
+改任意配置项（包括全部 `retry.*`）后点 **应用**，立刻作用到运行中的闸门。
+监听地址没变，所以客户端的 `ANTHROPIC_BASE_URL` 不用动。
+只有改 `host` / `port` 需要重启，窗口会先问你。
+**保存** 写回 `gate.config.json`，Node 版启动时读的也是这份。
+下半部分每秒刷新：排队数、窗口用量、冷却剩余、暂存数、重试计数，以及闸门日志。
+
+如果你的 Python 没带 tkinter（部分 Linux 发行版要单独装 `python3-tk`），就用 `python -m gate`。
 
 ### 接入 Claude Code
 
@@ -98,6 +115,7 @@ pi -e pi/gate-extension.ts  # Windows 也可以用 connect-via-gate-pi.bat
 | `retry.nextMinuteOffsetMs` | `GATE_RETRY_NEXT_MINUTE_OFFSET_MS` | `1000` | `1000` 对齐到第 01 秒，`0` 对齐到第 00 秒 |
 | `retry.maxHoldMs` | `GATE_RETRY_MAX_HOLD_MS` | `180000` | 单个请求最多暂存多久，超出就把 429 透传 |
 | `retry.maxStashed` | `GATE_RETRY_MAX_STASHED` | `50` | 同时最多暂存几个请求 |
+| `retry.hook` | `GATE_RETRY_HOOK` | `""` | 重试钩子文件；留空时有 `gate.hooks.js` / `gate.hooks.py` 就用（见下文） |
 
 单个请求可以用请求头覆盖重试设置，不用重启闸门：
 
@@ -106,6 +124,48 @@ pi -e pi/gate-extension.ts  # Windows 也可以用 connect-via-gate-pi.bat
 
 `retry.maxRetries` 按请求计数；`retry.maxHoldMs` 是单个请求的总暂存预算。
 上游 `Retry-After` 要求等的时间超过剩余预算时，闸门不会干等，直接把 429 还给客户端，由客户端自己退避。
+
+### 重试钩子：按请求改重试次数
+
+配置值表达不了的规则（「对话请求重试 5 次，`count_tokens` 不值得等」「这个 provider 用下一分钟模式」），
+在 `gate.config.json` 旁边放一个钩子文件：
+
+```bash
+cp gate.hooks.example.js gate.hooks.js   # Node 版
+cp gate.hooks.example.py gate.hooks.py   # Python 版
+```
+
+```js
+// gate.hooks.js
+exports.onRetry = (ctx) => {
+  if (ctx.path === '/v1/messages') return { maxRetries: 5 };
+  if (ctx.upstream === 'myprovider') return { maxRetries: 3, mode: 'nextMinute' };
+  if (ctx.heldMs > 60000) return false;   // 不再重试，把 429 透传
+};
+```
+
+```python
+# gate.hooks.py
+def on_retry(ctx):
+    if ctx["path"] == "/v1/messages":
+        return {"maxRetries": 5}
+```
+
+上游每返回一次 `retry.statuses` 里的状态码，闸门就调一次钩子。
+
+- `ctx` 里有 `status`、`attempt`、`heldMs`、`retryAfterMs`、`method`、`path`、`upstream`、`window`、
+  `stashed`，以及这一次原本要用的值：`maxRetries`、`mode`、`cooldownMs`、`nextMinuteOffsetMs`、
+  `respectRetryAfter`、`maxHoldMs`。
+- 不返回 = 不干预；返回 `false` = 把 429 透传；返回对象则覆盖其中写了的字段：`maxRetries`、`mode`、
+  `cooldownMs`、`nextMinuteOffsetMs`、`respectRetryAfter`、`maxHoldMs`、`waitMs`（直接指定等多久，不再按模式和 `Retry-After` 算）。
+- 优先级从低到高：`retry.*` 配置 → `x-gate-*` 请求头 → 钩子。
+- 文件改了会自动重载，不用重启。存了个坏文件时继续用上一次加载成功的版本；
+  钩子抛错或返回非法值只记日志，这次按配置走。
+- `retry.hook`（或 `GATE_RETRY_HOOK`）可以指到别的文件。写不带 `.js` / `.py` 的名字（比如 `"gate.hooks"`）时，两套实现各找各的。
+- 钩子必须是同步函数。`retry.enabled: false` 仍然是彻底关掉重试。
+- `/__gate/status` 的 `retry.hook` 里能看到是否加载成功、最近一次报错和调用计数。
+
+钩子是你自己的代码，跑在闸门进程里、权限与闸门相同。`gate.hooks.js` / `gate.hooks.py` 已加入 `.gitignore`。
 
 ## 状态查询
 

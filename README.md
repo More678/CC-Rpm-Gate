@@ -27,6 +27,9 @@ The Node and Python implementations are functionally equivalent, share one
   - `cooldown`: wait a fixed number of seconds (if the upstream's `Retry-After` is longer, that wins)
   - `nextMinute`: hold until second :00 or :01 of the next minute, for upstreams whose quota
     resets on the minute boundary
+- Retry hook: a small JS / Python file that changes the retry count (and wait mode) per request,
+  reloaded on save.
+- Desktop UI (Python): edit the config and apply it to the running gate without touching any client URL.
 - During a cooldown every window waits together, so no other window races ahead into the same limit.
 - SSE streaming responses are relayed as they arrive, never buffered.
 - Status endpoint `/__gate/status`: queue depth, window usage, cooldown remaining,
@@ -48,6 +51,21 @@ cd python && python -m gate # on Windows you can also double-click start-gate-py
 ```
 
 Both listen on the same port (17530 by default), so run only one of them.
+
+### Desktop UI (Python)
+
+```bash
+cd python && python -m gate --ui   # on Windows: double-click start-gate-ui.bat
+```
+
+A tkinter window (standard library, nothing to install) that runs the gate in the same process.
+Edit any setting, including every `retry.*` field, and press **Apply**: it takes effect on the
+running gate right away. Clients keep their `ANTHROPIC_BASE_URL` untouched because the listen
+address does not change. Only a `host` / `port` change needs a restart, and the window asks first.
+**Save** writes `gate.config.json`, which the Node version reads too. The lower half shows queue
+depth, window usage, cooldown, stashed requests, retry counters and the gate's log, refreshed every second.
+
+If your Python lacks tkinter (some Linux distros ship it as `python3-tk`), use `python -m gate` instead.
 
 ### Connecting Claude Code
 
@@ -105,6 +123,7 @@ Precedence from lowest to highest: built-in defaults → `gate.config.json` → 
 | `retry.nextMinuteOffsetMs` | `GATE_RETRY_NEXT_MINUTE_OFFSET_MS` | `1000` | `1000` aligns to second :01, `0` to second :00 |
 | `retry.maxHoldMs` | `GATE_RETRY_MAX_HOLD_MS` | `180000` | Longest a single request may stay stashed before its 429 is passed through |
 | `retry.maxStashed` | `GATE_RETRY_MAX_STASHED` | `50` | How many requests may be stashed at once |
+| `retry.hook` | `GATE_RETRY_HOOK` | `""` | Retry hook file; empty means use `gate.hooks.js` / `gate.hooks.py` if present (see below) |
 
 Individual requests can override the retry settings with headers, no restart needed:
 
@@ -114,6 +133,53 @@ Individual requests can override the retry settings with headers, no restart nee
 `retry.maxRetries` is counted per request; `retry.maxHoldMs` is a per-request budget for total
 stash time. If the upstream's `Retry-After` asks for more than the remaining budget, the gate does
 not sit and wait: it hands the 429 back to the client and lets the client back off.
+
+### Retry hook: change the retry count per request
+
+For rules that config values cannot express ("retry chat requests 5 times but give up on
+`count_tokens`", "use next-minute mode for this one provider"), drop a small hook file next to
+`gate.config.json`:
+
+```bash
+cp gate.hooks.example.js gate.hooks.js   # Node version
+cp gate.hooks.example.py gate.hooks.py   # Python version
+```
+
+```js
+// gate.hooks.js
+exports.onRetry = (ctx) => {
+  if (ctx.path === '/v1/messages') return { maxRetries: 5 };
+  if (ctx.upstream === 'myprovider') return { maxRetries: 3, mode: 'nextMinute' };
+  if (ctx.heldMs > 60000) return false;   // stop retrying, pass the 429 through
+};
+```
+
+```python
+# gate.hooks.py
+def on_retry(ctx):
+    if ctx["path"] == "/v1/messages":
+        return {"maxRetries": 5}
+```
+
+The gate calls it every time the upstream answers a status in `retry.statuses`.
+
+- `ctx` has `status`, `attempt`, `heldMs`, `retryAfterMs`, `method`, `path`, `upstream`, `window`,
+  `stashed`, plus the values that would apply otherwise: `maxRetries`, `mode`, `cooldownMs`,
+  `nextMinuteOffsetMs`, `respectRetryAfter`, `maxHoldMs`.
+- Return nothing to leave the decision alone, `false` to pass the 429 through, or an object
+  overriding any of `maxRetries`, `mode`, `cooldownMs`, `nextMinuteOffsetMs`, `respectRetryAfter`,
+  `maxHoldMs`, `waitMs` (an exact wait that skips the mode and `Retry-After` math).
+- Precedence, lowest to highest: `retry.*` config → `x-gate-*` request headers → hook.
+- The file is reloaded when it changes, so edits apply without a restart. If a save leaves it
+  broken, the gate keeps using the last version that loaded. A hook that throws or returns bad
+  values is logged and ignored for that request.
+- `retry.hook` (or `GATE_RETRY_HOOK`) points at a different file. A name without a `.js` / `.py`
+  extension, such as `"gate.hooks"`, lets each implementation pick its own file.
+- Hooks must be synchronous. `retry.enabled: false` still turns retrying off completely.
+- `/__gate/status` → `retry.hook` shows whether it loaded, the last error and call counters.
+
+The hook runs as your own code inside the gate process, with the same permissions.
+`gate.hooks.js` / `gate.hooks.py` are gitignored.
 
 ## Checking status
 
