@@ -17,6 +17,9 @@ const DEFAULT_RETRY = {
   respectRetryAfter: true,     // 上游 Retry-After 比冷却更久时听上游的
   maxHoldMs: 180000,           // 单个请求累计最多被暂存多久，超了就透传 429
   maxStashed: 50,              // 同时暂存的请求数上限，超了就透传 429
+  // 用户钩子文件：留空时看默认的 gate.hooks.js / gate_hooks.py 在不在，
+  // 在就加载。钩子能按请求改这次的重试次数和等待方式，见 src/hooks.js
+  hook: '',
 };
 
 const DEFAULTS = {
@@ -80,6 +83,7 @@ const RETRY_ENV_MAP = {
   GATE_RETRY_RESPECT_RETRY_AFTER: 'respectRetryAfter',
   GATE_RETRY_MAX_HOLD_MS: 'maxHoldMs',
   GATE_RETRY_MAX_STASHED: 'maxStashed',
+  GATE_RETRY_HOOK: 'hook',
 };
 
 const RETRY_INT_KEYS = ['maxRetries', 'cooldownMs', 'nextMinuteOffsetMs', 'maxHoldMs', 'maxStashed'];
@@ -273,6 +277,13 @@ function normalizeRetry(value) {
     }
     return n;
   });
+
+  // hook：false / null 当成不启用；其余必须是路径字符串
+  if (out.hook === false || out.hook === null) out.hook = '';
+  if (typeof out.hook !== 'string') {
+    throw new Error(`retry.hook 必须是钩子文件路径字符串，当前类型: ${typeof out.hook}`);
+  }
+  out.hook = out.hook.trim();
 
   // 只保留已知字段，拼错的名字不要静默生效
   const known = {};

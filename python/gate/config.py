@@ -27,6 +27,9 @@ DEFAULT_RETRY: Dict[str, Any] = {
     "respectRetryAfter": True,    # 上游 Retry-After 比冷却更久时听上游的
     "maxHoldMs": 180000,          # 单个请求累计最多被暂存多久，超了就透传 429
     "maxStashed": 50,             # 同时暂存的请求数上限，超了就透传 429
+    # 用户钩子文件：留空时看默认的 gate.hooks.py / gate.hooks.js 在不在，
+    # 在就加载。钩子能按请求改这次的重试次数和等待方式，见 gate/hooks.py
+    "hook": "",
 }
 
 RETRY_INT_KEYS = ("maxRetries", "cooldownMs", "nextMinuteOffsetMs", "maxHoldMs", "maxStashed")
@@ -46,6 +49,7 @@ RETRY_ENV_MAP = {
     "GATE_RETRY_RESPECT_RETRY_AFTER": "respectRetryAfter",
     "GATE_RETRY_MAX_HOLD_MS": "maxHoldMs",
     "GATE_RETRY_MAX_STASHED": "maxStashed",
+    "GATE_RETRY_HOOK": "hook",
 }
 
 DEFAULTS: Dict[str, Any] = {
@@ -273,6 +277,14 @@ def normalize_retry(value: Any) -> Dict[str, Any]:
             raise ConfigError(f"retry.statuses 里的状态码不合法: {s!r}")
         codes.append(n)
     out["statuses"] = codes
+
+    # hook：False / None 当成不启用；其余必须是路径字符串
+    if out["hook"] is False or out["hook"] is None:
+        out["hook"] = ""
+    if not isinstance(out["hook"], str):
+        raise ConfigError(
+            f"retry.hook 必须是钩子文件路径字符串，当前类型: {type(out['hook']).__name__}")
+    out["hook"] = out["hook"].strip()
 
     # 只保留已知字段，拼错的名字不要静默生效
     return {key: out[key] for key in DEFAULT_RETRY}

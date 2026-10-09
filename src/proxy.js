@@ -378,8 +378,9 @@ function createHandler(cfg, scheduler, logger, deps = {}) {
 
     // 要重试就得能重放请求体，所以先整个读进内存；不重试时保持原来的边读边转发
     const overrides = retryHook ? requestOverrides(req.headers) : {};
+    // 配了用户钩子时，钩子可能把 maxRetries 从 0 调上去，所以也要先缓存请求体
     const canRetry = Boolean(retryHook) && retryHook.cfg.enabled
-      && retryHook.maxRetriesFor(overrides) > 0;
+      && (retryHook.maxRetriesFor(overrides) > 0 || retryHook.hasUserHook());
     let body = null;
     if (canRetry) {
       try {
@@ -467,6 +468,7 @@ function createHandler(cfg, scheduler, logger, deps = {}) {
         heldMs,
         retryAfterMs: result.retryAfterMs,
         overrides,
+        meta,
       });
 
       if (decision.action === 'retry' && lastCaptured) {

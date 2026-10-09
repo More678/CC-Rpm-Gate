@@ -10,6 +10,10 @@ __pycache__/
 TASK_*.md
 PROGRESS_*.md
 
+# 用户自己的重试钩子：各人逻辑不同，不进仓库（示例是 gate.hooks.example.*）
+gate.hooks.js
+gate.hooks.py
+
 # 本地临时文件
 _smoke.py
 _pi_check.js

@@ -6,6 +6,10 @@
 
 与 Node 版 src/retry.js 行为一致。
 注意：nextMinute 必须用墙上时钟（time.time），不能用单调时钟，否则对不上真实的分钟边界。
+
+决策参数的优先级（低 → 高）：gate.config.json 的 retry.* → 请求头
+x-gate-max-retries / x-gate-retry-mode → 用户钩子文件（gate/hooks.py）。
+钩子能按请求改重试次数和等待方式，改完保存即生效，不用重启闸门。
 """
 
 from __future__ import annotations
@@ -66,10 +70,13 @@ class RetryHook:
         retry_cfg: Dict[str, Any],
         logger: Any = None,
         wall_now_ms: Optional[Callable[[], float]] = None,
+        user_hook: Any = None,
     ) -> None:
         self.cfg = retry_cfg
         self.logger = logger
         self._wall_now = wall_now_ms or _wall_now_ms
+        # 用户钩子（gate/hooks.py 的 UserHook），没配就是 None
+        self.user_hook = user_hook
         self._lock = threading.Lock()
 
         self.stashed = 0              # 当前正在暂存等待的请求数
@@ -94,6 +101,10 @@ class RetryHook:
     def mode_for(self, overrides: Optional[Dict[str, Any]] = None) -> str:
         return (overrides or {}).get("mode") or self.cfg["mode"]
 
+    def has_user_hook(self) -> bool:
+        """配了用户钩子时，钩子可能把重试次数从 0 调上去，所以请求体得先缓存好。"""
+        return bool(self.user_hook is not None and self.user_hook.enabled)
+
     def decide(
         self,
         status: int,
@@ -101,45 +112,83 @@ class RetryHook:
         held_ms: float = 0,
         retry_after_ms: Optional[float] = None,
         overrides: Optional[Dict[str, Any]] = None,
+        meta: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """拿到上游状态码后决定下一步。
 
         attempt 是已经发出去的次数（首次 = 1）；held_ms 是累计被暂存了多久。
+        优先级（低 → 高）：配置 → 请求头覆盖 → 用户钩子。
         返回 {"action": "retry", "waitMs": ..., "mode": ...} 或 {"action": "passthrough", "reason": ...}
         """
         overrides = overrides or {}
-        with self._lock:
-            if not self.cfg["enabled"]:
+        meta = meta or {}
+        if not self.cfg["enabled"]:
+            with self._lock:
                 return self._pass_locked("disabled")
-            if status not in self.cfg["statuses"]:
-                return {"action": "passthrough", "reason": "not-retryable"}
+        if status not in self.cfg["statuses"]:
+            return {"action": "passthrough", "reason": "not-retryable"}
 
-            if self.max_retries_for(overrides) < 1:
+        hint = retry_after_ms if (retry_after_ms is not None
+                                  and math.isfinite(retry_after_ms)
+                                  and retry_after_ms > 0) else 0
+        # 本次生效的参数：先配置，再叠请求头
+        eff: Dict[str, Any] = {
+            "maxRetries": self.max_retries_for(overrides),
+            "mode": self.mode_for(overrides),
+            "cooldownMs": self.cfg["cooldownMs"],
+            "nextMinuteOffsetMs": self.cfg["nextMinuteOffsetMs"],
+            "respectRetryAfter": self.cfg["respectRetryAfter"],
+            "maxHoldMs": self.cfg["maxHoldMs"],
+        }
+
+        # 再叠用户钩子。钩子是用户代码，不在锁里跑，免得它慢就卡住别的线程。
+        forced_wait_ms: Optional[int] = None
+        if self.user_hook is not None:
+            hooked = self.user_hook.apply({
+                "status": status,
+                "attempt": attempt,
+                "heldMs": held_ms,
+                "retryAfterMs": hint or None,
+                "method": meta.get("method"),
+                "path": meta.get("path"),
+                "upstream": meta.get("upstream"),
+                "window": meta.get("window"),
+                "stashed": self.stashed,
+                **eff,
+            })
+            if hooked.get("deny"):
+                with self._lock:
+                    return self._pass_locked("hook")
+            hook_overrides = dict(hooked.get("overrides") or {})
+            forced_wait_ms = hook_overrides.pop("waitMs", None)
+            eff.update(hook_overrides)
+
+        with self._lock:
+            if eff["maxRetries"] < 1:
                 return self._pass_locked("retry-disabled")
-            if attempt > self.max_retries_for(overrides):
+            if attempt > eff["maxRetries"]:
                 return self._pass_locked("max-retries")
             if self.stashed >= self.cfg["maxStashed"]:
                 return self._pass_locked("stash-full")
 
-            mode = self.mode_for(overrides)
-            hint = retry_after_ms if (retry_after_ms is not None
-                                      and math.isfinite(retry_after_ms)
-                                      and retry_after_ms > 0) else 0
             now = self._wall_now()
-            if mode == "nextMinute":
-                wait_ms = next_minute_wait_ms(now, self.cfg["nextMinuteOffsetMs"])
+            if forced_wait_ms is not None:
+                # 钩子直接给了等待时长：照办，不再叠 Retry-After
+                wait_ms: float = forced_wait_ms
+            elif eff["mode"] == "nextMinute":
+                wait_ms = next_minute_wait_ms(now, eff["nextMinuteOffsetMs"])
                 # 上游要求等更久：从它指定的时刻再往后对齐到下一个分钟边界
                 if hint > wait_ms:
-                    wait_ms = next_minute_wait_ms(now + hint, self.cfg["nextMinuteOffsetMs"]) + hint
-            elif self.cfg["respectRetryAfter"]:
-                wait_ms = max(self.cfg["cooldownMs"], hint)
+                    wait_ms = next_minute_wait_ms(now + hint, eff["nextMinuteOffsetMs"]) + hint
+            elif eff["respectRetryAfter"]:
+                wait_ms = max(eff["cooldownMs"], hint)
             else:
-                wait_ms = self.cfg["cooldownMs"]
+                wait_ms = eff["cooldownMs"]
 
             # 总暂存预算：别让一个请求在闸门里卡到天荒地老
-            if self.cfg["maxHoldMs"] > 0 and held_ms + wait_ms > self.cfg["maxHoldMs"]:
+            if eff["maxHoldMs"] > 0 and held_ms + wait_ms > eff["maxHoldMs"]:
                 return self._pass_locked("hold-budget")
-            return {"action": "retry", "waitMs": wait_ms, "mode": mode}
+            return {"action": "retry", "waitMs": wait_ms, "mode": eff["mode"]}
 
     def enter(self, wait_ms: float) -> float:
         """开始暂存等待，返回预计放行时刻。"""
@@ -189,6 +238,7 @@ class RetryHook:
                 "stashed": self.stashed,
                 "nextReleaseInMs": 0 if nxt is None else max(0, round(nxt - now)),
                 "stats": dict(self.stats),
+                "hook": self.user_hook.snapshot() if self.user_hook is not None else {"enabled": False},
             }
 
     # ---------- 内部 ----------
@@ -200,5 +250,16 @@ class RetryHook:
         return {"action": "passthrough", "reason": reason}
 
 
-def create_retry_hook(cfg: Dict[str, Any], logger: Any = None, **kwargs: Any) -> RetryHook:
-    return RetryHook(cfg["retry"], logger=logger, **kwargs)
+_AUTO = object()
+
+
+def create_retry_hook(cfg: Dict[str, Any], logger: Any = None, user_hook: Any = _AUTO,
+                      **kwargs: Any) -> RetryHook:
+    """建重试钩子。没显式传 user_hook 时按配置自动加载用户钩子文件。
+
+    传 user_hook=None 可以明确关掉（测试用）。
+    """
+    if user_hook is _AUTO:
+        from .hooks import create_user_hook  # 延迟导入，避免和 config 循环
+        user_hook = create_user_hook(cfg, logger=logger)
+    return RetryHook(cfg["retry"], logger=logger, user_hook=user_hook, **kwargs)
