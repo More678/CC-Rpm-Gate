@@ -13,8 +13,27 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
-# <repo>/python/gate/config.py → <repo>
+# <repo>/python/gate/config.py → <repo>（git clone / release 压缩包里就是仓库根目录）
 ROOT = Path(__file__).resolve().parents[2]
+HOME_DIR_NAME = ".cc-rpm-gate"
+
+
+def config_dir(env: Any = None, root: Any = ROOT) -> Path:
+    """配置目录：gate.config.json、相对路径的日志文件、钩子文件都相对它找。
+
+    1. 环境变量 GATE_HOME
+    2. 代码目录里有 gate.config.json（git clone / release 压缩包）→ 代码目录，和以前一样
+    3. 否则（pip 从 git 装进 site-packages 的，包里不带 gate.config.json）→ ~/.cc-rpm-gate，
+       装好的包目录可能没写权限，升级时还会被整个替换，不该放用户文件
+
+    与 Node 版 src/config.js 的 configDir() 规则一致。
+    """
+    environ = os.environ if env is None else env
+    if environ.get("GATE_HOME"):
+        return Path(environ["GATE_HOME"]).expanduser().resolve()
+    if Path(root, "gate.config.json").exists():
+        return Path(root)
+    return Path.home() / HOME_DIR_NAME
 
 # 429 重试钩子的默认值。闸门自己扛下限流重试，客户端（Claude Code / pi）看不到 429。
 DEFAULT_RETRY: Dict[str, Any] = {
@@ -380,13 +399,17 @@ def load_config(
     file: Any = ...,
     env: Dict[str, str] | None = None,
     overrides: Dict[str, Any] | None = None,
+    home: Any = None,
 ) -> Dict[str, Any]:
     """载入配置。
 
-    file 省略时读 <repo>/gate.config.json；传 None 表示完全跳过配置文件。
+    file 省略时读 <配置目录>/gate.config.json；传 None 表示完全跳过配置文件。
+    home 省略时按 config_dir() 算（用真实环境变量，不受 env 参数影响：
+    UI 传 env={} 是为了屏蔽 GATE_* 覆盖，不是为了换配置目录）。
     """
-    config_file = ROOT / "gate.config.json" if file is ... else file
     environ = os.environ if env is None else env
+    home_dir = Path(home).resolve() if home is not None else config_dir()
+    config_file = home_dir / "gate.config.json" if file is ... else file
 
     cfg: Dict[str, Any] = dict(DEFAULTS)
     if config_file is not None:
@@ -441,7 +464,9 @@ def load_config(
         known[key] = _coerce_int(known[key])
     known["upstream"] = _normalize_upstream(known["upstream"])
     known["upstreams"] = normalize_upstreams(known["upstreams"])
-    known["logFile"] = str(Path(ROOT, known["logFile"])) if known["logFile"] else ""
+    known["logFile"] = str(Path(home_dir, known["logFile"])) if known["logFile"] else ""
+    # 钩子文件也相对配置目录找，装好的包里不会有用户的钩子
+    known["configDir"] = str(home_dir)
     known["limits"] = normalize_limits(known["limits"])
     known["retry"] = normalize_retry(known["retry"])
 

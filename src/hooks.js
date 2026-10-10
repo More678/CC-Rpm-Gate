@@ -217,14 +217,16 @@ class UserHook {
 
 /**
  * 按配置建用户钩子。
- * 没配 retry.hook 时看默认文件 <root>/gate.hooks.js 在不在，在就用。
+ * 没配 retry.hook 时看默认文件 <配置目录>/gate.hooks.js 在不在，在就用。
  */
 function createUserHook(cfg, deps = {}) {
   const raw = cfg.retry ? cfg.retry.hook : undefined;
   const explicit = raw !== undefined && raw !== null && raw !== '';
+  // 相对路径按配置目录找（git clone 时就是仓库根目录；npm 全局安装时是 ~/.cc-rpm-gate）
+  const root = deps.root || cfg.configDir || ROOT;
   const file = explicit
-    ? resolveHookPath(raw, deps.root)
-    : resolveHookPath('gate.hooks.js', deps.root);
+    ? resolveHookPath(raw, root)
+    : resolveHookPath('gate.hooks.js', root);
   // 没显式配置时，文件不存在就当没这回事
   if (!explicit && file && !fs.existsSync(file)) {
     return new UserHook('', deps);

@@ -2,9 +2,25 @@
 
 // 配置加载：默认值 → gate.config.json → 环境变量，后者覆盖前者。
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
+// 代码所在目录（git clone / release 压缩包里就是仓库根目录）
 const ROOT = path.resolve(__dirname, '..');
+const HOME_DIR_NAME = '.cc-rpm-gate';
+
+/**
+ * 配置目录：gate.config.json、相对路径的日志文件、钩子文件都相对它找。
+ *   1. 环境变量 GATE_HOME
+ *   2. 代码目录里有 gate.config.json（git clone / release 压缩包）→ 代码目录，和以前一样
+ *   3. 否则（npm / pip 从 git 装的，包里不带 gate.config.json）→ ~/.cc-rpm-gate，
+ *      装好的包目录可能没写权限，升级时还会被整个替换，不该放用户文件
+ */
+function configDir(env = process.env, root = ROOT) {
+  if (env.GATE_HOME) return path.resolve(env.GATE_HOME);
+  if (fs.existsSync(path.join(root, 'gate.config.json'))) return root;
+  return path.join(os.homedir(), HOME_DIR_NAME);
+}
 
 // 429 重试钩子的默认值。闸门自己扛下限流重试，客户端（Claude Code / pi）看不到 429。
 const DEFAULT_RETRY = {
@@ -344,13 +360,17 @@ function validate(cfg) {
 /**
  * 载入配置。
  * @param {object} [opts]
- * @param {string} [opts.file] 配置文件路径，默认 <root>/gate.config.json
+ * @param {string} [opts.file] 配置文件路径，默认 <配置目录>/gate.config.json；传 null 表示不读文件
  * @param {object} [opts.env] 环境变量来源，默认 process.env
+ * @param {object} [opts.home] 配置目录，默认按 configDir() 算
  * @param {object} [opts.overrides] 代码层覆盖（测试用）
  */
 function loadConfig(opts = {}) {
-  const file = opts.file === undefined ? path.join(ROOT, 'gate.config.json') : opts.file;
   const env = opts.env || process.env;
+  // 配置目录按真实环境变量算，不受 opts.env 影响：opts.env 是用来屏蔽/替换 GATE_* 覆盖的，
+  // 不是用来换配置目录的（与 Python 版 load_config 一致）
+  const home = opts.home === undefined ? configDir(process.env) : path.resolve(opts.home);
+  const file = opts.file === undefined ? path.join(home, 'gate.config.json') : opts.file;
 
   const cfg = { ...DEFAULTS };
   if (file) Object.assign(cfg, readConfigFile(file));
@@ -400,7 +420,9 @@ function loadConfig(opts = {}) {
 
   known.upstream = normalizeUpstream(known.upstream);
   known.upstreams = normalizeUpstreams(known.upstreams);
-  known.logFile = known.logFile ? path.resolve(ROOT, known.logFile) : '';
+  known.logFile = known.logFile ? path.resolve(home, known.logFile) : '';
+  // 钩子文件也相对配置目录找，装好的包里不会有用户的钩子
+  known.configDir = home;
   known.limits = normalizeLimits(known.limits);
   known.retry = normalizeRetry(known.retry);
 
@@ -411,6 +433,7 @@ function loadConfig(opts = {}) {
 
 module.exports = {
   loadConfig,
+  configDir,
   normalizeLimits,
   effectiveLimits,
   normalizeRetry,
@@ -421,4 +444,5 @@ module.exports = {
   DEFAULT_RETRY,
   RETRY_MODES,
   ROOT,
+  HOME_DIR_NAME,
 };

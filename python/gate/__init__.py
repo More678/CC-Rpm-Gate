@@ -19,7 +19,7 @@ from .logger import create_logger
 from .retry import RetryHook, create_retry_hook, next_minute_wait_ms
 from .scheduler import Scheduler, GateError
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 __all__ = [
     "load_config",

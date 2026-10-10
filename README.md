@@ -40,7 +40,48 @@ The Node and Python implementations are functionally equivalent, share one
 - Node.js 18+, or Python 3.8+ (either one)
 - The launchers are `.bat` files for Windows; on other platforms start it from the command line
 
+## Install
+
+Pick one. Neither pulls in third-party runtime dependencies.
+
+```bash
+# Node: installs the `cc-rpm-gate` command
+npm install -g github:More678/CC-Rpm-Gate
+
+# Python: installs `cc-rpm-gate-py` (console) and `cc-rpm-gate-ui` (desktop UI)
+pip install "git+https://github.com/More678/CC-Rpm-Gate.git#subdirectory=python"
+
+# Or just clone and run from the checkout (see Quick start below)
+git clone https://github.com/More678/CC-Rpm-Gate.git
+```
+
+Pin a release by appending the tag, e.g. `github:More678/CC-Rpm-Gate#v1.3.0` or
+`...CC-Rpm-Gate.git@v1.3.0#subdirectory=python`.
+
+After installing, create your config and start the gate:
+
+```bash
+cc-rpm-gate --init      # or: cc-rpm-gate-py --init
+cc-rpm-gate             # or: cc-rpm-gate-py / cc-rpm-gate-ui
+cc-rpm-gate --status    # or: cc-rpm-gate-py --status
+```
+
+**Where config lives.** `gate.config.json`, a relative `logFile` and the hook files are looked up in
+the config directory:
+
+1. `GATE_HOME`, if set
+2. the code directory, if it contains `gate.config.json` (a git clone or release archive, so existing setups are unchanged)
+3. otherwise `~/.cc-rpm-gate` (an npm / pip install, whose package directory may be read-only and is replaced on upgrade)
+
+`--init` writes a default config there without overwriting an existing one. Both installed versions
+share `~/.cc-rpm-gate`, just like a checkout shares one `gate.config.json`.
+
+To uninstall: `npm uninstall -g cc-rpm-gate` / `pip uninstall cc-rpm-gate`. Your config in
+`~/.cc-rpm-gate` is left alone.
+
 ## Quick start
+
+From a clone (if you installed with npm / pip, use `cc-rpm-gate` / `cc-rpm-gate-py` instead):
 
 ```bash
 # Node
@@ -91,6 +132,9 @@ Then:
 
 ```bash
 pi -e pi/gate-extension.ts  # on Windows you can also use connect-via-gate-pi.bat
+
+# installed with npm: the extension ships inside the package
+pi -e "$(npm root -g)/cc-rpm-gate/pi/gate-extension.ts"
 ```
 
 Type `/gate` inside pi to see the gate's status. See [pi/README.md](pi/README.md) for details.
@@ -124,6 +168,9 @@ Precedence from lowest to highest: built-in defaults → `gate.config.json` → 
 | `retry.maxHoldMs` | `GATE_RETRY_MAX_HOLD_MS` | `180000` | Longest a single request may stay stashed before its 429 is passed through |
 | `retry.maxStashed` | `GATE_RETRY_MAX_STASHED` | `50` | How many requests may be stashed at once |
 | `retry.hook` | `GATE_RETRY_HOOK` | `""` | Retry hook file; empty means use `gate.hooks.js` / `gate.hooks.py` if present (see below) |
+
+Relative paths in `logFile` and `retry.hook` resolve against the config directory, and `GATE_HOME`
+overrides where that is (see [Install](#install)).
 
 Individual requests can override the retry settings with headers, no restart needed:
 

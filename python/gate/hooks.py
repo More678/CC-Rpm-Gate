@@ -245,11 +245,14 @@ def _safe_str(err: BaseException) -> str:
         return type(err).__name__
 
 
-def create_user_hook(cfg: Dict[str, Any], logger: Any = None, root: Any = ROOT) -> UserHook:
+def create_user_hook(cfg: Dict[str, Any], logger: Any = None, root: Any = None) -> UserHook:
     """按配置建用户钩子。
 
-    没配 retry.hook 时看默认文件 <root>/gate.hooks.py 在不在，在就用。
+    没配 retry.hook 时看默认文件 <配置目录>/gate.hooks.py 在不在，在就用。
+    相对路径按配置目录找（git clone 时就是仓库根目录；pip 安装时是 ~/.cc-rpm-gate）。
     """
+    if root is None:
+        root = cfg.get("configDir") or ROOT
     raw = (cfg.get("retry") or {}).get("hook")
     explicit = raw is not None and raw != ""
     file = resolve_hook_path(raw if explicit else "gate.hooks.py", root)

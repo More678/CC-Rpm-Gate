@@ -89,7 +89,9 @@ jobs:
           # the launchers and the pi extension. Tests and CI config stay out.
           mkdir -p "dist/$DIR/python"
           cp -r src "dist/$DIR/src"
+          cp -r bin "dist/$DIR/bin"
           cp -r python/gate "dist/$DIR/python/gate"
+          cp python/pyproject.toml "dist/$DIR/python/"
           cp -r pi "dist/$DIR/pi"
           cp gate.config.json gate-settings.json package.json LICENSE "dist/$DIR"/
           cp gate.hooks.example.js gate.hooks.example.py "dist/$DIR"/

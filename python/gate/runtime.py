@@ -15,15 +15,13 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .config import ROOT, ConfigError, load_config
+from .config import ROOT, ConfigError, config_dir, load_config
 from .hooks import create_user_hook
 from .logger import Logger, create_logger
 from .proxy import make_handler_class
 from .retry import RetryHook
 from .scheduler import Scheduler
 from .server import ThreadedHTTPServer, build
-
-CONFIG_FILE = ROOT / "gate.config.json"
 
 # 这些键改了必须重启才能生效（监听地址变了，原地换不了）
 RESTART_KEYS = ("host", "port")
@@ -55,9 +53,9 @@ def config_to_json(cfg: Dict[str, Any]) -> Dict[str, Any]:
             out[key] = [{"windowMs": int(l["windowMs"]), "max": int(l["max"])} for l in val]
         elif key == "logFile" and val:
             try:
-                out[key] = Path(val).relative_to(ROOT).as_posix()
+                out[key] = Path(val).relative_to(cfg.get("configDir") or ROOT).as_posix()
             except ValueError:
-                out[key] = str(val)  # 配到仓库外面去了，原样存绝对路径
+                out[key] = str(val)  # 配到配置目录外面去了，原样存绝对路径
         elif key == "retry":
             out[key] = dict(val)
         elif key in ("bypassPaths", "upstreams"):
@@ -68,8 +66,15 @@ def config_to_json(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def save_config(cfg: Dict[str, Any], file: Any = None) -> str:
-    """把配置写回 gate.config.json（先写临时文件再替换，中途出错不会留半截文件）。"""
-    target = Path(CONFIG_FILE if file is None else file)
+    """把配置写回 <配置目录>/gate.config.json（先写临时文件再替换，中途出错不会留半截文件）。
+
+    pip 安装后第一次保存时 ~/.cc-rpm-gate 可能还不存在，这里顺手建好。
+    """
+    if file is None:
+        target = Path(cfg.get("configDir") or config_dir()) / "gate.config.json"
+    else:
+        target = Path(file)
+    target.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(config_to_json(cfg), ensure_ascii=False, indent=2) + "\n"
     tmp = target.with_name(target.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")

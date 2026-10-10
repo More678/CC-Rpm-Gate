@@ -1,0 +1,33 @@
+# Python 版的打包配置，只为了能从 git 直接安装：
+#   pip install "git+https://github.com/More678/CC-Rpm-Gate.git#subdirectory=python"
+# 装好后有 cc-rpm-gate-py（命令行）和 cc-rpm-gate-ui（图形界面）两个命令。
+# 运行时零第三方依赖；setuptools 只在 pip 构建时用到。
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cc-rpm-gate"
+dynamic = ["version"]
+description = "Local request gate for Claude Code and pi: one shared rate limit across windows, with automatic 429 stash-and-retry."
+requires-python = ">=3.8"
+# 不写 license 字段：表格写法 { text = ... } 已被新版 setuptools 弃用，
+# SPDX 字符串写法又要 setuptools>=77，而它不再支持 Python 3.8。许可证见仓库根目录 LICENSE（MIT）。
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/More678/CC-Rpm-Gate"
+
+[project.scripts]
+cc-rpm-gate-py = "gate.__main__:main"
+
+[project.gui-scripts]
+# gui-scripts：Windows 上用 pythonw 启动，不留黑框
+cc-rpm-gate-ui = "gate.ui:run"
+
+[tool.setuptools]
+packages = ["gate"]
+
+[tool.setuptools.dynamic]
+version = { attr = "gate.__version__" }

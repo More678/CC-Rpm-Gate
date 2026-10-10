@@ -83,7 +83,7 @@ def config_to_form(cfg: Dict[str, Any]) -> Dict[str, str]:
             # 存的是 [{windowMs, max}]，界面上用紧凑写法 "5/10s"
             form[key] = ", ".join(_limit_text(l) for l in (val or []))
         elif key == "logFile":
-            form[key] = _rel_log(val)
+            form[key] = _rel_log(val, cfg.get("configDir"))
         else:
             form[key] = "" if val is None else str(val)
     return form
@@ -98,13 +98,14 @@ def _limit_text(lim: Dict[str, Any]) -> str:
     return f"{lim['max']}/{ms}ms"
 
 
-def _rel_log(val: Any) -> str:
+def _rel_log(val: Any, base: Any = None) -> str:
+    """日志路径显示成相对配置目录的写法，和 gate.config.json 里的写法一致。"""
     if not val:
         return ""
-    from .config import ROOT
     from pathlib import Path
+    from .config import config_dir
     try:
-        return Path(val).relative_to(ROOT).as_posix()
+        return Path(val).relative_to(base or config_dir()).as_posix()
     except ValueError:
         return str(val)
 

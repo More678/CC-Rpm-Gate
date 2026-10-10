@@ -33,7 +33,46 @@ Node 和 Python 两套实现功能对等，共用同一份 `gate.config.json`，
 - Node.js 18+，或 Python 3.8+（任选其一）
 - Windows 下的启动脚本是 `.bat`；其他平台直接用命令行启动
 
+## 安装
+
+任选其一，都不带第三方运行时依赖。
+
+```bash
+# Node 版：装好后有 cc-rpm-gate 命令
+npm install -g github:More678/CC-Rpm-Gate
+
+# Python 版：装好后有 cc-rpm-gate-py（命令行）和 cc-rpm-gate-ui（图形界面）
+pip install "git+https://github.com/More678/CC-Rpm-Gate.git#subdirectory=python"
+
+# 或者直接 clone 下来在仓库里跑（见下面的「快速开始」）
+git clone https://github.com/More678/CC-Rpm-Gate.git
+```
+
+要固定版本就在后面加 tag，例如 `github:More678/CC-Rpm-Gate#v1.3.0`、
+`...CC-Rpm-Gate.git@v1.3.0#subdirectory=python`。
+
+装好之后先生成配置，再启动：
+
+```bash
+cc-rpm-gate --init      # 或 cc-rpm-gate-py --init
+cc-rpm-gate             # 或 cc-rpm-gate-py / cc-rpm-gate-ui
+cc-rpm-gate --status    # 或 cc-rpm-gate-py --status
+```
+
+**配置放在哪。** `gate.config.json`、相对路径的 `logFile`、钩子文件都在「配置目录」里找：
+
+1. 设了 `GATE_HOME` 就用它
+2. 代码目录里有 `gate.config.json` 就用代码目录（git clone 或 release 压缩包，已有的用法不受影响）
+3. 否则用 `~/.cc-rpm-gate`（npm / pip 安装的情况：包目录可能没写权限，升级时还会被整个替换）
+
+`--init` 往那里写一份默认配置，已经有了就不覆盖。npm 版和 pip 版装好后共用 `~/.cc-rpm-gate`，
+和 clone 下来时两版共用一个 `gate.config.json` 是一样的。
+
+卸载：`npm uninstall -g cc-rpm-gate` / `pip uninstall cc-rpm-gate`，`~/.cc-rpm-gate` 里的配置不会被删。
+
 ## 快速开始
+
+在 clone 下来的仓库里（如果是 npm / pip 装的，换成 `cc-rpm-gate` / `cc-rpm-gate-py`）：
 
 ```bash
 # Node 版
@@ -83,6 +122,9 @@ pi 不认 `ANTHROPIC_BASE_URL`，要用扩展改 provider 的 `baseUrl`。
 
 ```bash
 pi -e pi/gate-extension.ts  # Windows 也可以用 connect-via-gate-pi.bat
+
+# npm 装的：扩展就在包里
+pi -e "$(npm root -g)/cc-rpm-gate/pi/gate-extension.ts"
 ```
 
 在 pi 里输入 `/gate` 可以查看闸门状态。详见 [pi/README.zh-CN.md](pi/README.zh-CN.md)。
@@ -116,6 +158,8 @@ pi -e pi/gate-extension.ts  # Windows 也可以用 connect-via-gate-pi.bat
 | `retry.maxHoldMs` | `GATE_RETRY_MAX_HOLD_MS` | `180000` | 单个请求最多暂存多久，超出就把 429 透传 |
 | `retry.maxStashed` | `GATE_RETRY_MAX_STASHED` | `50` | 同时最多暂存几个请求 |
 | `retry.hook` | `GATE_RETRY_HOOK` | `""` | 重试钩子文件；留空时有 `gate.hooks.js` / `gate.hooks.py` 就用（见下文） |
+
+`logFile` 和 `retry.hook` 的相对路径都相对配置目录，`GATE_HOME` 可以改配置目录的位置（见[安装](#安装)）。
 
 单个请求可以用请求头覆盖重试设置，不用重启闸门：
 

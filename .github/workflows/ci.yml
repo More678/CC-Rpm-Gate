@@ -53,6 +53,51 @@ jobs:
         run: python -m unittest discover -s tests -v
         working-directory: python
 
+  install:
+    name: Install from source
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Same code path as `npm install -g github:More678/CC-Rpm-Gate`: pack, then install the tarball.
+      - name: npm install -g
+        run: |
+          set -euo pipefail
+          npm pack --silent
+          npm install -g ./cc-rpm-gate-*.tgz
+          export GATE_HOME="$RUNNER_TEMP/npm-home"
+          cc-rpm-gate --version
+          cc-rpm-gate --init
+          test -f "$GATE_HOME/gate.config.json"
+          # The installed package must not ship a config, otherwise config lookup would point inside node_modules.
+          test ! -e "$(npm root -g)/cc-rpm-gate/gate.config.json"
+          GATE_PORT=17599 cc-rpm-gate & PID=$!
+          for i in $(seq 1 20); do curl -fs http://127.0.0.1:17599/__gate/health && break; sleep 0.5; done
+          GATE_PORT=17599 cc-rpm-gate --status > /dev/null
+          kill $PID
+      # Same code path as `pip install "git+https://...#subdirectory=python"`.
+      - name: pip install
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/venv"
+          . "$RUNNER_TEMP/venv/bin/activate"
+          pip install --quiet ./python
+          export GATE_HOME="$RUNNER_TEMP/pip-home"
+          cc-rpm-gate-py --version
+          cc-rpm-gate-py --init
+          test -f "$GATE_HOME/gate.config.json"
+          command -v cc-rpm-gate-ui
+          GATE_PORT=17598 cc-rpm-gate-py & PID=$!
+          for i in $(seq 1 20); do curl -fs http://127.0.0.1:17598/__gate/health && break; sleep 0.5; done
+          GATE_PORT=17598 cc-rpm-gate-py --status > /dev/null
+          kill $PID
+
   version-sync:
     name: Version sync
     runs-on: ubuntu-latest
